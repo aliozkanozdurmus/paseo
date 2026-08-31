@@ -33,7 +33,6 @@ export interface WorkspaceTabPresentation {
 
 const DEFAULT_STATUS_DOT_OFFSET = -2;
 const STATUS_ALERT_OFFSET = -3;
-export const WORKSPACE_TAB_PIN_ICON_SIZE = ICON_SIZE.xs;
 
 interface WorkspaceTabPresentationResolverProps {
   tab: WorkspaceTabDescriptor;
@@ -191,9 +190,7 @@ export function WorkspaceTabIcon({
 export function WorkspaceTabPinIcon({ isPinned }: { isPinned: boolean }): ReactElement {
   return (
     <View style={styles.pinIconSlot} accessibilityElementsHidden>
-      {isPinned ? (
-        <ThemedPin size={WORKSPACE_TAB_PIN_ICON_SIZE} uniProps={mutedColorMapping} />
-      ) : null}
+      {isPinned ? <ThemedPin size={ICON_SIZE.xs} uniProps={mutedColorMapping} /> : null}
     </View>
   );
 }
@@ -281,8 +278,8 @@ const styles = StyleSheet.create((theme) => ({
     flexShrink: 0,
   },
   pinIconSlot: {
-    width: WORKSPACE_TAB_PIN_ICON_SIZE,
-    height: WORKSPACE_TAB_PIN_ICON_SIZE,
+    width: ICON_SIZE.xs,
+    height: ICON_SIZE.xs,
     flexShrink: 0,
     alignItems: "center",
     justifyContent: "center",

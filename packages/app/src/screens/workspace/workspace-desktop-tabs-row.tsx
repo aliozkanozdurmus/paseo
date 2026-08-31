@@ -55,7 +55,6 @@ import {
   WorkspaceTabPresentationResolver,
   WorkspaceTabIcon,
   WorkspaceTabPinIcon,
-  WORKSPACE_TAB_PIN_ICON_SIZE,
   type WorkspaceTabPresentation,
 } from "@/screens/workspace/workspace-tab-presentation";
 import { buildDeterministicWorkspaceTabId } from "@/workspace-tabs/identity";
@@ -67,7 +66,7 @@ import {
 } from "@/screens/workspace/workspace-tab-menu";
 import type { WorkspaceTabDescriptor } from "@/screens/workspace/workspace-tabs-types";
 import type { SurfaceBackdrop } from "@/styles/surface-backdrop";
-import type { Theme } from "@/styles/theme";
+import { ICON_SIZE, type Theme } from "@/styles/theme";
 import { RenderProfile } from "@/utils/render-profiler";
 import { TrailingActionScrim } from "@/components/ui/trailing-action-scrim";
 import { useKeyboardActionHandler } from "@/hooks/use-keyboard-action-handler";
@@ -441,7 +440,7 @@ function completeWorkspaceTabLabelWidths(
     // The modified dot sits in the content row, so a modified tab needs that much more width
     // before its label starts truncating.
     const modifiedAllowance = modified ? TAB_CONTENT_GAP + TAB_MODIFIED_DOT_SIZE : 0;
-    const pinAllowance = TAB_CONTENT_GAP + WORKSPACE_TAB_PIN_ICON_SIZE;
+    const pinAllowance = TAB_CONTENT_GAP + ICON_SIZE.xs;
     widths.push(measurement.width + TAB_LABEL_LAYOUT_ALLOWANCE + modifiedAllowance + pinAllowance);
   }
   return widths;

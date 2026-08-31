@@ -62,6 +62,7 @@ describe("workspace pane close action", () => {
       },
       focusedPaneId: "closing",
     };
+    const canMoveTabsToPane = vi.fn(() => true);
     const closeTabs = vi.fn(async () => true);
     const moveTabToPane = vi.fn(() => true);
     const closePane = vi.fn();
@@ -77,17 +78,25 @@ describe("workspace pane close action", () => {
         [survivingTab.tabId, survivingTab],
       ]),
       title: "Close pane",
+      canMoveTabsToPane,
       closeTabs,
       moveTabToPane,
       closePane,
     });
 
     expect(closed).toBe(true);
+    expect(canMoveTabsToPane).toHaveBeenCalledWith(
+      [pinnedAgentTab.tabId, pinnedTerminalTab.tabId],
+      "surviving",
+    );
     expect(closeTabs).toHaveBeenCalledWith({
       tabsToClose: [unpinnedTab],
       title: "Close pane",
       logLabel: "from pane close",
     });
+    expect(canMoveTabsToPane.mock.invocationCallOrder[0]).toBeLessThan(
+      closeTabs.mock.invocationCallOrder[0],
+    );
     expect(moveTabToPane).toHaveBeenNthCalledWith(1, pinnedAgentTab.tabId, "surviving");
     expect(moveTabToPane).toHaveBeenNthCalledWith(2, pinnedTerminalTab.tabId, "surviving");
     expect(closePane).toHaveBeenCalledWith("closing");
@@ -113,6 +122,7 @@ describe("workspace pane close action", () => {
       },
       focusedPaneId: "main",
     };
+    const canMoveTabsToPane = vi.fn(() => true);
     const closeTabs = vi.fn(async () => true);
     const moveTabToPane = vi.fn(() => true);
     const closePane = vi.fn();
@@ -123,19 +133,25 @@ describe("workspace pane close action", () => {
       explorerSidebarPaneId: null,
       tabsById: new Map([[pinnedTab.tabId, pinnedTab]]),
       title: "Close pane",
+      canMoveTabsToPane,
       closeTabs,
       moveTabToPane,
       closePane,
     });
 
     expect(closed).toBe(false);
+    expect(canMoveTabsToPane).not.toHaveBeenCalled();
     expect(closeTabs).not.toHaveBeenCalled();
     expect(moveTabToPane).not.toHaveBeenCalled();
     expect(closePane).not.toHaveBeenCalled();
   });
 
-  it("keeps the pane open when the layout store rejects a pinned-tab relocation", async () => {
+  it("does not tear down unpinned tabs when relocation preflight fails", async () => {
     const pinnedTab = createTab("changes_tree", { kind: "changes_tree" }, true);
+    const unpinnedTab = createTab("file_/repo/temporary.ts", {
+      kind: "file",
+      path: "/repo/temporary.ts",
+    });
     const layout: WorkspaceLayout = {
       root: {
         kind: "group",
@@ -148,8 +164,8 @@ describe("workspace pane close action", () => {
               kind: "pane",
               pane: {
                 id: "explorer",
-                tabIds: [pinnedTab.tabId],
-                focusedTabId: pinnedTab.tabId,
+                tabIds: [pinnedTab.tabId, unpinnedTab.tabId],
+                focusedTabId: unpinnedTab.tabId,
               },
             },
             {
@@ -161,28 +177,30 @@ describe("workspace pane close action", () => {
       },
       focusedPaneId: "explorer",
     };
+    const canMoveTabsToPane = vi.fn(() => false);
     const closeTabs = vi.fn(async () => true);
-    const moveTabToPane = vi.fn(() => false);
+    const moveTabToPane = vi.fn(() => true);
     const closePane = vi.fn();
 
     const closed = await executeCloseWorkspacePaneAction({
       layout,
       paneId: "explorer",
       explorerSidebarPaneId: "explorer",
-      tabsById: new Map([[pinnedTab.tabId, pinnedTab]]),
+      tabsById: new Map([
+        [pinnedTab.tabId, pinnedTab],
+        [unpinnedTab.tabId, unpinnedTab],
+      ]),
       title: "Close pane",
+      canMoveTabsToPane,
       closeTabs,
       moveTabToPane,
       closePane,
     });
 
     expect(closed).toBe(false);
-    expect(closeTabs).toHaveBeenCalledWith({
-      tabsToClose: [],
-      title: "Close pane",
-      logLabel: "from pane close",
-    });
-    expect(moveTabToPane).toHaveBeenCalledWith(pinnedTab.tabId, "main");
+    expect(canMoveTabsToPane).toHaveBeenCalledWith([pinnedTab.tabId], "main");
+    expect(closeTabs).not.toHaveBeenCalled();
+    expect(moveTabToPane).not.toHaveBeenCalled();
     expect(closePane).not.toHaveBeenCalled();
   });
 });

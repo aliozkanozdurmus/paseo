@@ -18,6 +18,7 @@ interface ExecuteCloseWorkspacePaneActionInput {
   explorerSidebarPaneId?: string | null;
   tabsById: ReadonlyMap<string, WorkspaceTabDescriptor>;
   title: string;
+  canMoveTabsToPane: (tabIds: readonly string[], paneId: string) => boolean;
   closeTabs: (input: CloseTabsRequest) => Promise<boolean>;
   moveTabToPane: (tabId: string, paneId: string) => boolean;
   closePane: (paneId: string) => void;
@@ -47,6 +48,10 @@ export async function executeCloseWorkspacePaneAction(
     } else if (descriptor) {
       tabsToClose.push(descriptor);
     }
+  }
+
+  if (pinnedTabIds.length > 0 && !input.canMoveTabsToPane(pinnedTabIds, destinationPane.id)) {
+    return false;
   }
 
   const closed = await input.closeTabs({

@@ -66,12 +66,14 @@ import {
   findPaneContainingTab,
   getFocusedBrowserId,
   FOCUSED_PANE_PLACEMENT,
+  resolveExplorerSidebarPaneId,
   selectExplorerSidebarPaneId,
   type WorkspaceLayout,
   type WorkspaceTabPlacement,
   useWorkspaceLayoutStore,
   useWorkspaceLayoutStoreHydrated,
 } from "@/stores/workspace-layout-store";
+import { moveTabToPaneInLayout } from "@/stores/workspace-layout-actions";
 import {
   buildWorkspaceTabPersistenceKey,
   type WorkspaceTab,
@@ -191,6 +193,7 @@ import { findAdjacentPane } from "@/utils/split-navigation";
 import { supportsDesktopPaneSplits, useIsCompactFormFactor } from "@/constants/layout";
 import { getIsElectron, isNative, isWeb } from "@/constants/platform";
 import type { SurfaceBackdrop } from "@/styles/surface-backdrop";
+import { panelTargetSupportsHostForWorkspaceKey } from "@/plugins/workspace-panels/locations";
 import { buildHostRootRoute, buildSettingsHostRoute } from "@/utils/host-routes";
 import { useWorkspaceTerminals } from "@/screens/workspace/terminals/use-workspace-terminals";
 import type { TerminalProfile } from "@getpaseo/protocol/messages";
@@ -2956,6 +2959,48 @@ function WorkspaceScreenContent({
         explorerSidebarPaneId,
         tabsById: allTabDescriptorsById,
         title: t("workspace.tabs.confirmations.closePaneTitle"),
+        canMoveTabsToPane: (tabIds, destinationPaneId) => {
+          const layoutState = useWorkspaceLayoutStore.getState();
+          let candidateLayout = layoutState.layoutByWorkspace[persistenceKey];
+          if (!candidateLayout) {
+            return false;
+          }
+          const liveExplorerSidebarPaneId = resolveExplorerSidebarPaneId(
+            candidateLayout,
+            layoutState.explorerSidebarPaneIdByWorkspace[persistenceKey],
+          );
+          const destinationHost =
+            destinationPaneId === liveExplorerSidebarPaneId ? "explorer" : "main";
+          for (const tabId of tabIds) {
+            const movingTab = collectAllTabs(candidateLayout.root).find(
+              (tab) => tab.tabId === tabId,
+            );
+            if (
+              !movingTab ||
+              !panelTargetSupportsHostForWorkspaceKey(
+                persistenceKey,
+                movingTab.target,
+                destinationHost,
+              )
+            ) {
+              return false;
+            }
+            const nextLayout = moveTabToPaneInLayout({
+              layout: candidateLayout,
+              tabId,
+              toPaneId: destinationPaneId,
+              explorerSidebarPaneId: liveExplorerSidebarPaneId,
+            });
+            if (
+              !nextLayout ||
+              findPaneContainingTab(nextLayout.root, tabId)?.id !== destinationPaneId
+            ) {
+              return false;
+            }
+            candidateLayout = nextLayout;
+          }
+          return true;
+        },
         closeTabs: handleBulkCloseTabs,
         moveTabToPane: (tabId, destinationPaneId) => {
           moveWorkspaceTabToPane(persistenceKey, tabId, destinationPaneId);
