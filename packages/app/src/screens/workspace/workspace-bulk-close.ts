@@ -34,6 +34,29 @@ export const DEFAULT_BULK_CLOSE_CONFIRMATION_LABELS: BulkCloseConfirmationLabels
   agents: ({ agents }) => `This will archive ${agents} agent(s).`,
 };
 
+export type BulkCloseSelection = "before" | "after" | "others";
+
+export function selectBulkCloseTabs(
+  tabs: WorkspaceTabDescriptor[],
+  anchorTabId: string,
+  selection: BulkCloseSelection,
+): WorkspaceTabDescriptor[] {
+  const anchorIndex = tabs.findIndex((tab) => tab.tabId === anchorTabId);
+  if (anchorIndex < 0) {
+    return [];
+  }
+
+  let candidates: WorkspaceTabDescriptor[];
+  if (selection === "before") {
+    candidates = tabs.slice(0, anchorIndex);
+  } else if (selection === "after") {
+    candidates = tabs.slice(anchorIndex + 1);
+  } else {
+    candidates = tabs.filter((tab) => tab.tabId !== anchorTabId);
+  }
+  return candidates.filter((tab) => tab.isPinned !== true);
+}
+
 interface CloseWorkspaceTabWithCleanupInput {
   tabId: string;
   target?: WorkspaceTabDescriptor["target"];

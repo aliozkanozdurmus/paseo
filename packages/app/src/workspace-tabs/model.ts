@@ -52,6 +52,7 @@ export interface WorkspaceTab {
   tabId: string;
   target: WorkspaceTabTarget;
   createdAt: number;
+  isPinned?: boolean;
   state?: JsonValue;
 }
 

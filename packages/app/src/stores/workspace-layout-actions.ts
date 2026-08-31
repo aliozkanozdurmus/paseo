@@ -381,6 +381,7 @@ function normalizeWorkspaceTab(value: unknown): WorkspaceTab | null {
     tabId,
     target,
     createdAt: typeof tab.createdAt === "number" ? tab.createdAt : Date.now(),
+    ...(tab.isPinned === true ? { isPinned: true } : {}),
     ...(tab.state !== undefined ? { state: tab.state } : {}),
   };
 }
@@ -881,6 +882,7 @@ function replaceTabInTree(
     tabId: string;
     nextTabId: string;
     target: WorkspaceTabTarget;
+    isPinned?: boolean;
     state?: JsonValue;
   },
 ): SplitNodeInternal {
@@ -898,6 +900,7 @@ function replaceTabInTree(
             tabId: input.nextTabId,
             target: input.target,
             createdAt: tab.createdAt,
+            ...((input.isPinned ?? tab.isPinned) === true ? { isPinned: true } : {}),
             ...(input.state !== undefined ? { state: input.state } : {}),
           };
         }),
@@ -1786,6 +1789,27 @@ export function setTabStateInLayout(input: {
   });
 }
 
+export function setTabPinnedInLayout(input: {
+  layout: WorkspaceLayout;
+  tabId: string;
+  isPinned: boolean;
+}): WorkspaceLayout | null {
+  const layout = asInternalLayout(input.layout);
+  const tab = collectAllTabs(layout.root).find((candidate) => candidate.tabId === input.tabId);
+  if (!tab || tab.isPinned === input.isPinned) return null;
+  return withNormalizedParentTabMap({
+    root: replaceTabInTree(layout.root, {
+      tabId: tab.tabId,
+      nextTabId: tab.tabId,
+      target: tab.target,
+      isPinned: input.isPinned,
+      state: tab.state,
+    }),
+    focusedPaneId: layout.focusedPaneId,
+    parentTabIdByTabId: input.layout.parentTabIdByTabId,
+  });
+}
+
 export function convertDraftToAgentInLayout(
   input: ConvertDraftToAgentInLayoutInput,
 ): ConvertDraftToAgentInLayoutResult | null {
@@ -1804,11 +1828,20 @@ export function convertDraftToAgentInLayout(
     collectAllTabs(layout.root).find((tab) => tab.tabId === canonicalTabId) ?? null;
 
   if (existingCanonicalTab && existingCanonicalTab.tabId !== input.tabId) {
-    const nextLayout =
+    let nextLayout = input.layout;
+    if (currentTab.isPinned === true && existingCanonicalTab.isPinned !== true) {
+      nextLayout =
+        setTabPinnedInLayout({
+          layout: nextLayout,
+          tabId: existingCanonicalTab.tabId,
+          isPinned: true,
+        }) ?? nextLayout;
+    }
+    nextLayout =
       closeTabInLayout({
-        layout: input.layout,
+        layout: nextLayout,
         tabId: input.tabId,
-      }) ?? input.layout;
+      }) ?? nextLayout;
     return {
       layout:
         focusTabInLayout({
@@ -2279,6 +2312,23 @@ function buildEntityTabGroups(initialTabs: WorkspaceTab[]): Map<string, EntityTa
   return entityGroups;
 }
 
+function preserveEntityGroupPinnedState(input: {
+  layout: WorkspaceLayout;
+  keeper: WorkspaceTab;
+  tabs: WorkspaceTab[];
+}): WorkspaceLayout {
+  if (input.keeper.isPinned === true || !input.tabs.some((tab) => tab.isPinned === true)) {
+    return input.layout;
+  }
+  return (
+    setTabPinnedInLayout({
+      layout: input.layout,
+      tabId: input.keeper.tabId,
+      isPinned: true,
+    }) ?? input.layout
+  );
+}
+
 function collapseStaleEntityTabs(input: {
   layout: WorkspaceLayout;
   snapshot: WorkspaceTabSnapshot;
@@ -2465,6 +2515,11 @@ export function reconcileWorkspaceTabs(
         parentTabIdByTabId: nextLayout.parentTabIdByTabId,
       });
     }
+    nextLayout = preserveEntityGroupPinnedState({
+      layout: nextLayout,
+      keeper,
+      tabs: group.tabs,
+    });
     for (const tab of group.tabs) {
       if (tab.tabId === keeper.tabId) {
         continue;

@@ -11,6 +11,8 @@ export interface WorkspaceTabMenuLabels {
   copyTerminalId: string;
   copyFilePath: string;
   rename: string;
+  pinTab: string;
+  unpinTab: string;
   closeAbove: string;
   closeBelow: string;
   closeLeft: string;
@@ -27,6 +29,8 @@ export const DEFAULT_WORKSPACE_TAB_MENU_LABELS: WorkspaceTabMenuLabels = {
   copyTerminalId: i18n.t("workspace.tabs.menu.copyTerminalId"),
   copyFilePath: i18n.t("workspace.tabs.menu.copyFilePath"),
   rename: i18n.t("workspace.tabs.menu.rename"),
+  pinTab: i18n.t("workspace.tabs.menu.pinTab"),
+  unpinTab: i18n.t("workspace.tabs.menu.unpinTab"),
   closeAbove: i18n.t("workspace.tabs.menu.closeAbove"),
   closeBelow: i18n.t("workspace.tabs.menu.closeBelow"),
   closeLeft: i18n.t("workspace.tabs.menu.closeLeft"),
@@ -49,6 +53,7 @@ export type WorkspaceTabMenuEntry =
         | "arrow-right-to-line"
         | "copy-x"
         | "pencil"
+        | "pin"
         | "x";
       hint?: string;
       tooltip?: string;
@@ -74,6 +79,7 @@ interface BuildWorkspaceTabMenuEntriesInput {
   onCopyFilePath: (path: string) => Promise<void> | void;
   onReloadAgent: (agentId: string) => Promise<void> | void;
   onRenameTab: (tab: WorkspaceTabDescriptor) => void;
+  onTogglePinTab: (tabId: string) => void;
   onCloseTab: (tabId: string) => Promise<void> | void;
   onCloseTabsBefore: (tabId: string) => Promise<void> | void;
   onCloseTabsAfter: (tabId: string) => Promise<void> | void;
@@ -91,6 +97,7 @@ interface BuildWorkspaceDesktopTabActionsInput {
   onCopyFilePath: (path: string) => Promise<void> | void;
   onReloadAgent: (agentId: string) => Promise<void> | void;
   onRenameTab: (tab: WorkspaceTabDescriptor) => void;
+  onTogglePinTab: (tabId: string) => void;
   onCloseTab: (tabId: string) => Promise<void> | void;
   onCloseTabsToLeft: (tabId: string) => Promise<void> | void;
   onCloseTabsToRight: (tabId: string) => Promise<void> | void;
@@ -178,6 +185,7 @@ export function buildWorkspaceTabMenuEntries(
     onCopyFilePath,
     onReloadAgent,
     onRenameTab,
+    onTogglePinTab,
     onCloseTab,
     onCloseTabsBefore,
     onCloseTabsAfter,
@@ -254,11 +262,22 @@ export function buildWorkspaceTabMenuEntries(
         onRenameTab(tab);
       },
     });
-    entries.push({
-      kind: "separator",
-      key: "rename-separator",
-    });
   }
+
+  entries.push({
+    kind: "item",
+    key: "toggle-pin",
+    label: tab.isPinned === true ? labels.unpinTab : labels.pinTab,
+    icon: "pin",
+    testID: `${menuTestIDBase}-pin`,
+    onSelect: () => {
+      onTogglePinTab(tab.tabId);
+    },
+  });
+  entries.push({
+    kind: "separator",
+    key: "pin-separator",
+  });
 
   entries.push({
     kind: "item",
@@ -339,6 +358,7 @@ export function buildWorkspaceDesktopTabActions(
       onCopyFilePath: input.onCopyFilePath,
       onReloadAgent: input.onReloadAgent,
       onRenameTab: input.onRenameTab,
+      onTogglePinTab: input.onTogglePinTab,
       onCloseTab: input.onCloseTab,
       onCloseTabsBefore: input.onCloseTabsToLeft,
       onCloseTabsAfter: input.onCloseTabsToRight,
