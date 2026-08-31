@@ -56,6 +56,10 @@ export interface WorkspaceTab {
   state?: JsonValue;
 }
 
+export function isWorkspaceTabTargetPersistent(target: WorkspaceTabTarget): boolean {
+  return target.kind !== "commit_diff" && target.kind !== "new_tab";
+}
+
 export function buildWorkspaceTabPersistenceKey(input: {
   serverId: string;
   workspaceId: string;

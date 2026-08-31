@@ -36,11 +36,14 @@ export const DEFAULT_BULK_CLOSE_CONFIRMATION_LABELS: BulkCloseConfirmationLabels
 
 export type BulkCloseSelection = "before" | "after" | "others";
 
-export function selectBulkCloseTabs(
-  tabs: WorkspaceTabDescriptor[],
-  anchorTabId: string,
-  selection: BulkCloseSelection,
-): WorkspaceTabDescriptor[] {
+interface SelectBulkCloseTabsInput {
+  tabs: WorkspaceTabDescriptor[];
+  anchorTabId: string;
+  selection: BulkCloseSelection;
+}
+
+export function selectBulkCloseTabs(input: SelectBulkCloseTabsInput): WorkspaceTabDescriptor[] {
+  const { tabs, anchorTabId, selection } = input;
   const anchorIndex = tabs.findIndex((tab) => tab.tabId === anchorTabId);
   if (anchorIndex < 0) {
     return [];
@@ -55,6 +58,66 @@ export function selectBulkCloseTabs(
     candidates = tabs.filter((tab) => tab.tabId !== anchorTabId);
   }
   return candidates.filter((tab) => tab.isPinned !== true);
+}
+
+interface BulkCloseTabsRequest {
+  tabsToClose: WorkspaceTabDescriptor[];
+  title: string;
+  logLabel: string;
+}
+
+interface WorkspaceTabBulkCloseLabels {
+  beforeTitle: string;
+  afterTitle: string;
+  othersTitle: string;
+}
+
+interface CreateWorkspaceTabBulkCloseActionsInput {
+  closeTabs: (input: BulkCloseTabsRequest) => Promise<boolean>;
+  labels: WorkspaceTabBulkCloseLabels;
+}
+
+export interface WorkspaceTabBulkCloseActions {
+  closeTabsBefore: (tabId: string, paneTabs: WorkspaceTabDescriptor[]) => Promise<void>;
+  closeTabsAfter: (tabId: string, paneTabs: WorkspaceTabDescriptor[]) => Promise<void>;
+  closeOtherTabs: (tabId: string, paneTabs: WorkspaceTabDescriptor[]) => Promise<void>;
+}
+
+interface CloseSelectedTabsInput {
+  selection: BulkCloseSelection;
+  tabId: string;
+  paneTabs: WorkspaceTabDescriptor[];
+}
+
+export function createWorkspaceTabBulkCloseActions(
+  input: CreateWorkspaceTabBulkCloseActionsInput,
+): WorkspaceTabBulkCloseActions {
+  const titles: Record<BulkCloseSelection, string> = {
+    before: input.labels.beforeTitle,
+    after: input.labels.afterTitle,
+    others: input.labels.othersTitle,
+  };
+  const logLabels: Record<BulkCloseSelection, string> = {
+    before: "to the left",
+    after: "to the right",
+    others: "from close other tabs",
+  };
+  async function closeSelectedTabs(args: CloseSelectedTabsInput): Promise<void> {
+    const { selection, tabId, paneTabs } = args;
+    await input.closeTabs({
+      tabsToClose: selectBulkCloseTabs({ tabs: paneTabs, anchorTabId: tabId, selection }),
+      title: titles[selection],
+      logLabel: logLabels[selection],
+    });
+  }
+
+  return {
+    closeTabsBefore: (tabId, paneTabs) =>
+      closeSelectedTabs({ selection: "before", tabId, paneTabs }),
+    closeTabsAfter: (tabId, paneTabs) => closeSelectedTabs({ selection: "after", tabId, paneTabs }),
+    closeOtherTabs: (tabId, paneTabs) =>
+      closeSelectedTabs({ selection: "others", tabId, paneTabs }),
+  };
 }
 
 interface CloseWorkspaceTabWithCleanupInput {

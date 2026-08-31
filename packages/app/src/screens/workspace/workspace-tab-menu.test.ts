@@ -381,7 +381,6 @@ describe("buildWorkspaceTabMenuEntries", () => {
   });
 
   it.each<WorkspaceTabDescriptor["target"]>([
-    { kind: "new_tab" },
     { kind: "draft", draftId: "draft-1" },
     { kind: "agent", agentId: "agent-1" },
     { kind: "provider_subagent", parentAgentId: "parent-1", subagentId: "child-1" },
@@ -394,8 +393,7 @@ describe("buildWorkspaceTabMenuEntries", () => {
     { kind: "working_diff" },
     { kind: "plugin", pluginId: "plugin-1", panelId: "panel-1", context: "workspace" },
     { kind: "setup", workspaceId: "workspace-1" },
-    { kind: "commit_diff", sha: "abc123" },
-  ])("shows the pin action for $kind tabs", (target) => {
+  ])("shows the pin action for persistent $kind tabs", (target) => {
     const tab: WorkspaceTabDescriptor = {
       key: `tab-${target.kind}`,
       tabId: `tab-${target.kind}`,
@@ -430,6 +428,41 @@ describe("buildWorkspaceTabMenuEntries", () => {
         testID: `workspace-tab-context-${tab.tabId}-pin`,
       }),
     );
+  });
+
+  it.each<WorkspaceTabDescriptor["target"]>([
+    { kind: "new_tab" },
+    { kind: "commit_diff", sha: "abc123" },
+  ])("omits the pin action for ephemeral $kind tabs", (target) => {
+    const tab: WorkspaceTabDescriptor = {
+      key: `tab-${target.kind}`,
+      tabId: `tab-${target.kind}`,
+      kind: target.kind,
+      target,
+    };
+    const entries = buildWorkspaceTabMenuEntries({
+      surface: "desktop",
+      tab,
+      index: 0,
+      tabCount: 1,
+      menuTestIDBase: `workspace-tab-context-${tab.tabId}`,
+      onCopyResumeCommand: vi.fn(),
+      onCopyAgentId: vi.fn(),
+      onCopyTerminalId: vi.fn(),
+      onCopyFilePath: vi.fn(),
+      onReloadAgent: vi.fn(),
+      onRenameTab: vi.fn(),
+      onTogglePinTab: vi.fn(),
+      onCloseTab: vi.fn(),
+      onCloseTabsBefore: vi.fn(),
+      onCloseTabsAfter: vi.fn(),
+      onCloseOtherTabs: vi.fn(),
+    });
+
+    expect(entries).not.toContainEqual(
+      expect.objectContaining({ kind: "item", key: "toggle-pin" }),
+    );
+    expect(entries).not.toContainEqual({ kind: "separator", key: "pin-separator" });
   });
 
   it("switches to Unpin tab and dispatches the toggle for a pinned tab", () => {

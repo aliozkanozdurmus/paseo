@@ -16,7 +16,7 @@ import {
   STATUS_INDICATOR_ALERT_SIZE,
   STATUS_INDICATOR_DOT_SIZE,
 } from "@/utils/status-indicator-geometry";
-import type { Theme } from "@/styles/theme";
+import { ICON_SIZE, type Theme } from "@/styles/theme";
 import { usePanelInstanceAttributes } from "@/panels/panel-instance-attributes";
 
 export interface WorkspaceTabPresentation {
@@ -33,7 +33,7 @@ export interface WorkspaceTabPresentation {
 
 const DEFAULT_STATUS_DOT_OFFSET = -2;
 const STATUS_ALERT_OFFSET = -3;
-export const WORKSPACE_TAB_PIN_ICON_SIZE = 12;
+export const WORKSPACE_TAB_PIN_ICON_SIZE = ICON_SIZE.xs;
 
 interface WorkspaceTabPresentationResolverProps {
   tab: WorkspaceTabDescriptor;

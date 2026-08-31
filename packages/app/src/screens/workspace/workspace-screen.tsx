@@ -61,10 +61,9 @@ import { type ExplorerCheckoutContext } from "@/stores/explorer-checkout-context
 import { traceInstant } from "@/performance/native-trace";
 import { useSessionStore, type WorkspaceDescriptor } from "@/stores/session-store";
 import {
-  canDismissPaneInLayout,
   collectAllTabs,
   DEFAULT_PANE_ID,
-  findPaneById,
+  findPaneContainingTab,
   getFocusedBrowserId,
   FOCUSED_PANE_PLACEMENT,
   selectExplorerSidebarPaneId,
@@ -180,8 +179,9 @@ import {
   type BulkCloseConfirmationLabels,
   classifyBulkClosableTabs,
   closeBulkWorkspaceTabs,
-  selectBulkCloseTabs,
+  createWorkspaceTabBulkCloseActions,
 } from "@/screens/workspace/workspace-bulk-close";
+import { executeCloseWorkspacePaneAction } from "@/screens/workspace/workspace-pane-close";
 import { resolveCloseAgentTabPolicy } from "@/subagents";
 import {
   getPanelInstanceAttributes,
@@ -2908,20 +2908,21 @@ function WorkspaceScreenContent({
     ],
   );
 
-  const handleCloseTabsToLeftInPane = useCallback(
-    async (tabId: string, paneTabs: WorkspaceTabDescriptor[]) => {
-      const index = paneTabs.findIndex((tab) => tab.tabId === tabId);
-      if (index < 0) {
-        return;
-      }
-      await handleBulkCloseTabs({
-        tabsToClose: selectBulkCloseTabs(paneTabs, tabId, "before"),
-        title: t("workspace.tabs.confirmations.closeTabsLeftTitle"),
-        logLabel: "to the left",
-      });
-    },
+  const bulkCloseActions = useMemo(
+    () =>
+      createWorkspaceTabBulkCloseActions({
+        closeTabs: handleBulkCloseTabs,
+        labels: {
+          beforeTitle: t("workspace.tabs.confirmations.closeTabsLeftTitle"),
+          afterTitle: t("workspace.tabs.confirmations.closeTabsRightTitle"),
+          othersTitle: t("workspace.tabs.confirmations.closeOtherTabsTitle"),
+        },
+      }),
     [handleBulkCloseTabs, t],
   );
+  const handleCloseTabsToLeftInPane = bulkCloseActions.closeTabsBefore;
+  const handleCloseTabsToRightInPane = bulkCloseActions.closeTabsAfter;
+  const handleCloseOtherTabsInPane = bulkCloseActions.closeOtherTabs;
 
   const handleCloseTabsToLeft = useCallback(
     async (tabId: string) => {
@@ -2930,37 +2931,11 @@ function WorkspaceScreenContent({
     [handleCloseTabsToLeftInPane, tabs],
   );
 
-  const handleCloseTabsToRightInPane = useCallback(
-    async (tabId: string, paneTabs: WorkspaceTabDescriptor[]) => {
-      const index = paneTabs.findIndex((tab) => tab.tabId === tabId);
-      if (index < 0) {
-        return;
-      }
-      await handleBulkCloseTabs({
-        tabsToClose: selectBulkCloseTabs(paneTabs, tabId, "after"),
-        title: t("workspace.tabs.confirmations.closeTabsRightTitle"),
-        logLabel: "to the right",
-      });
-    },
-    [handleBulkCloseTabs, t],
-  );
-
   const handleCloseTabsToRight = useCallback(
     async (tabId: string) => {
       await handleCloseTabsToRightInPane(tabId, tabs);
     },
     [handleCloseTabsToRightInPane, tabs],
-  );
-
-  const handleCloseOtherTabsInPane = useCallback(
-    async (tabId: string, paneTabs: WorkspaceTabDescriptor[]) => {
-      await handleBulkCloseTabs({
-        tabsToClose: selectBulkCloseTabs(paneTabs, tabId, "others"),
-        title: t("workspace.tabs.confirmations.closeOtherTabsTitle"),
-        logLabel: "from close other tabs",
-      });
-    },
-    [handleBulkCloseTabs, t],
   );
 
   const handleCloseOtherTabs = useCallback(
@@ -2975,31 +2950,31 @@ function WorkspaceScreenContent({
       if (!persistenceKey || !workspaceLayout) {
         return;
       }
-      const pane = findPaneById(workspaceLayout.root, paneId);
-      // Ask before tearing anything down. The layout refuses to dismiss the final
-      // visible pane, and discovering that after closing its tabs would cost the
-      // user the tabs and leave the pane standing.
-      if (!pane || !canDismissPaneInLayout(workspaceLayout, paneId, explorerSidebarPaneId)) {
-        return;
-      }
-      const tabsToClose = pane.tabIds.flatMap((tabId) => {
-        const tab = allTabDescriptorsById.get(tabId);
-        return tab ? [tab] : [];
-      });
-      const closed = await handleBulkCloseTabs({
-        tabsToClose,
+      await executeCloseWorkspacePaneAction({
+        layout: workspaceLayout,
+        paneId,
+        explorerSidebarPaneId,
+        tabsById: allTabDescriptorsById,
         title: t("workspace.tabs.confirmations.closePaneTitle"),
-        logLabel: "from pane close",
+        closeTabs: handleBulkCloseTabs,
+        moveTabToPane: (tabId, destinationPaneId) => {
+          moveWorkspaceTabToPane(persistenceKey, tabId, destinationPaneId);
+          const nextLayout = useWorkspaceLayoutStore.getState().layoutByWorkspace[persistenceKey];
+          return (
+            nextLayout !== undefined &&
+            findPaneContainingTab(nextLayout.root, tabId)?.id === destinationPaneId
+          );
+        },
+        closePane: (closingPaneId) => {
+          closeWorkspacePane(persistenceKey, closingPaneId);
+        },
       });
-      if (!closed) {
-        return;
-      }
-      closeWorkspacePane(persistenceKey, paneId);
     },
     [
       allTabDescriptorsById,
       closeWorkspacePane,
       handleBulkCloseTabs,
+      moveWorkspaceTabToPane,
       persistenceKey,
       t,
       workspaceLayout,

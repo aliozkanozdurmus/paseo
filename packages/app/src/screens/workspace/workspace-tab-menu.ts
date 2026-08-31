@@ -2,6 +2,7 @@ import type { WorkspaceTabDescriptor } from "@/screens/workspace/workspace-tabs-
 import { i18n } from "@/i18n/i18next";
 import { encodeFilePathForPathSegment, encodeWorkspaceIdForPathSegment } from "@/utils/host-routes";
 import { buildDeterministicWorkspaceTabId } from "@/workspace-tabs/identity";
+import { isWorkspaceTabTargetPersistent } from "@/workspace-tabs/model";
 
 export type WorkspaceTabMenuSurface = "desktop" | "mobile";
 
@@ -195,6 +196,7 @@ export function buildWorkspaceTabMenuEntries(
   const isFirstTab = index === 0;
   const isLastTab = index === tabCount - 1;
   const isOnlyTab = tabCount <= 1;
+  const isPersistentTab = isWorkspaceTabTargetPersistent(tab.target);
   const entries: WorkspaceTabMenuEntry[] = [];
 
   if (tab.target.kind === "agent") {
@@ -264,20 +266,22 @@ export function buildWorkspaceTabMenuEntries(
     });
   }
 
-  entries.push({
-    kind: "item",
-    key: "toggle-pin",
-    label: tab.isPinned === true ? labels.unpinTab : labels.pinTab,
-    icon: "pin",
-    testID: `${menuTestIDBase}-pin`,
-    onSelect: () => {
-      onTogglePinTab(tab.tabId);
-    },
-  });
-  entries.push({
-    kind: "separator",
-    key: "pin-separator",
-  });
+  if (isPersistentTab) {
+    entries.push({
+      kind: "item",
+      key: "toggle-pin",
+      label: tab.isPinned === true ? labels.unpinTab : labels.pinTab,
+      icon: "pin",
+      testID: `${menuTestIDBase}-pin`,
+      onSelect: () => {
+        onTogglePinTab(tab.tabId);
+      },
+    });
+    entries.push({
+      kind: "separator",
+      key: "pin-separator",
+    });
+  }
 
   entries.push({
     kind: "item",

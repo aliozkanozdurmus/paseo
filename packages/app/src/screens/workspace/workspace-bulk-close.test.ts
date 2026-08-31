@@ -47,19 +47,32 @@ describe("workspace bulk close helpers", () => {
     const right = makeAgentTab("right");
     const tabs = [left, pinnedLeft, anchor, pinnedRight, right];
 
-    expect(selectBulkCloseTabs(tabs, anchor.tabId, "before")).toEqual([left]);
-    expect(selectBulkCloseTabs(tabs, anchor.tabId, "after")).toEqual([right]);
-    expect(selectBulkCloseTabs(tabs, anchor.tabId, "others")).toEqual([left, right]);
+    expect(selectBulkCloseTabs({ tabs, anchorTabId: anchor.tabId, selection: "before" })).toEqual([
+      left,
+    ]);
+    expect(selectBulkCloseTabs({ tabs, anchorTabId: anchor.tabId, selection: "after" })).toEqual([
+      right,
+    ]);
+    expect(selectBulkCloseTabs({ tabs, anchorTabId: anchor.tabId, selection: "others" })).toEqual([
+      left,
+      right,
+    ]);
   });
 
   it("returns no bulk-close candidates when the anchor is missing or every candidate is pinned", () => {
     const anchor = makeAgentTab("anchor");
     const tabs = [pinned(makeFileTab("/repo/left.ts")), anchor, pinned(makeTerminalTab("right"))];
 
-    expect(selectBulkCloseTabs(tabs, "missing", "others")).toEqual([]);
-    expect(selectBulkCloseTabs(tabs, anchor.tabId, "before")).toEqual([]);
-    expect(selectBulkCloseTabs(tabs, anchor.tabId, "after")).toEqual([]);
-    expect(selectBulkCloseTabs(tabs, anchor.tabId, "others")).toEqual([]);
+    expect(selectBulkCloseTabs({ tabs, anchorTabId: "missing", selection: "others" })).toEqual([]);
+    expect(selectBulkCloseTabs({ tabs, anchorTabId: anchor.tabId, selection: "before" })).toEqual(
+      [],
+    );
+    expect(selectBulkCloseTabs({ tabs, anchorTabId: anchor.tabId, selection: "after" })).toEqual(
+      [],
+    );
+    expect(selectBulkCloseTabs({ tabs, anchorTabId: anchor.tabId, selection: "others" })).toEqual(
+      [],
+    );
   });
 
   it("classifies agent, terminal, and passive tabs for shared bulk close handling", () => {

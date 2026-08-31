@@ -38,6 +38,7 @@ import type { PanelIconProps } from "@/panels/panel-registry";
 import { panelTargetSupportsHost } from "@/plugins/workspace-panels/locations";
 import type { Theme } from "@/styles/theme";
 import type { SurfaceBackdrop } from "@/styles/surface-backdrop";
+import { isWorkspaceTabTargetPersistent } from "@/workspace-tabs/model";
 import {
   HorizontalScrollBoundaryShades,
   useHorizontalScrollBoundary,
@@ -112,6 +113,7 @@ function ExplorerSidebarTab({
     [item.tab.tabId, onMoveTabToMain],
   );
   const canMoveToMain = panelTargetSupportsHost(normalizedServerId, item.tab.target, "main");
+  const canPinTab = isWorkspaceTabTargetPersistent(item.tab.target);
   const moveToMainLeading = useMemo(
     () => <ThemedArrowLeftToLine size={14} uniProps={mutedColorMapping} />,
     [],
@@ -171,18 +173,22 @@ function ExplorerSidebarTab({
             </ContextMenuItem>
           ) : null}
           {canMoveToMain ? <ContextMenuSeparator /> : null}
-          <ContextMenuItem
-            testID={`explorer-sidebar-tab-${item.tab.tabId}-pin`}
-            leading={pinLeading}
-            onSelect={handleTogglePin}
-          >
-            {t(
-              item.tab.isPinned === true
-                ? "workspace.tabs.menu.unpinTab"
-                : "workspace.tabs.menu.pinTab",
-            )}
-          </ContextMenuItem>
-          <ContextMenuSeparator />
+          {canPinTab ? (
+            <>
+              <ContextMenuItem
+                testID={`explorer-sidebar-tab-${item.tab.tabId}-pin`}
+                leading={pinLeading}
+                onSelect={handleTogglePin}
+              >
+                {t(
+                  item.tab.isPinned === true
+                    ? "workspace.tabs.menu.unpinTab"
+                    : "workspace.tabs.menu.pinTab",
+                )}
+              </ContextMenuItem>
+              <ContextMenuSeparator />
+            </>
+          ) : null}
           <ContextMenuItem leading={closeLeading} onSelect={handleClose}>
             {t("workspace.tabs.menu.close")}
           </ContextMenuItem>
@@ -202,6 +208,7 @@ function ExplorerSidebarTab({
       isDragging,
       item,
       canMoveToMain,
+      canPinTab,
       closeLeading,
       pinLeading,
       moveToMainLeading,
