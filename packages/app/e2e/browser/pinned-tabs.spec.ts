@@ -77,6 +77,7 @@ test.describe("Pinned workspace tabs", () => {
       await gotoWorkspace(page, workspace.workspaceId);
       const pinned = await openTerminalTab(page, workspace);
       const anchor = await openTerminalTab(page, workspace);
+      const disposable = await openTerminalTab(page, workspace);
 
       await openTabContextMenu(pinned);
       const pinItem = page.getByTestId(`workspace-tab-context-terminal_${pinned.id}-pin`);
@@ -85,15 +86,16 @@ test.describe("Pinned workspace tabs", () => {
       await pinItem.click();
 
       await expect(pinGlyph(pinned.tab)).toBeVisible({ timeout: 10_000 });
+      await expect(page.locator('[data-testid^="workspace-tab-terminal_"]:visible')).toHaveCount(3);
       await page.screenshot({ path: `${QA_DIR}/02-pinned-tab-row.png`, fullPage: false });
 
-      const disposable = await openTerminalTab(page, workspace);
-      await acceptCloseOtherTabs(page, anchor);
+      await acceptCloseOtherTabs(page, pinned);
 
       await expect(pinned.tab).toBeVisible();
       await expect(pinGlyph(pinned.tab)).toBeVisible();
-      await expect(anchor.tab).toBeVisible();
+      await expect(anchor.tab).toHaveCount(0, { timeout: 30_000 });
       await expect(disposable.tab).toHaveCount(0, { timeout: 30_000 });
+      await expect(page.locator('[data-testid^="workspace-tab-terminal_"]:visible')).toHaveCount(1);
       await page.screenshot({
         path: `${QA_DIR}/03-close-others-pinned-survives.png`,
         fullPage: false,
@@ -105,8 +107,9 @@ test.describe("Pinned workspace tabs", () => {
       await unpinItem.click();
       await expect(pinGlyph(pinned.tab)).toHaveCount(0);
 
-      await acceptCloseOtherTabs(page, anchor);
-      await expect(anchor.tab).toBeVisible();
+      const unpinnedAnchor = await openTerminalTab(page, workspace);
+      await acceptCloseOtherTabs(page, unpinnedAnchor);
+      await expect(unpinnedAnchor.tab).toBeVisible();
       await expect(pinned.tab).toHaveCount(0, { timeout: 30_000 });
     } finally {
       await workspace.cleanup();
