@@ -1,9 +1,6 @@
-import { mkdir } from "node:fs/promises";
 import { expect, test, type Page } from "../support/fixtures";
 import { clickNewTerminal, gotoWorkspace } from "../support/helpers/launcher";
 import { seedWorkspace, type SeededWorkspace } from "../support/helpers/seed-client";
-
-const QA_DIR = "/tmp/pinned-tabs-qa";
 
 interface OpenTerminalTab {
   id: string;
@@ -68,9 +65,8 @@ async function acceptCloseOtherTabs(page: Page, tab: OpenTerminalTab): Promise<v
 }
 
 test.describe("Pinned workspace tabs", () => {
-  test("pins a terminal tab and protects it from Close other tabs", async ({ page }) => {
+  test("pins a terminal tab and protects it from Close other tabs", async ({ page }, testInfo) => {
     test.setTimeout(120_000);
-    await mkdir(QA_DIR, { recursive: true });
     const workspace = await seedWorkspace({ repoPrefix: "pinned-tabs-" });
 
     try {
@@ -82,22 +78,25 @@ test.describe("Pinned workspace tabs", () => {
       await openTabContextMenu(pinned);
       const pinItem = page.getByTestId(`workspace-tab-context-terminal_${pinned.id}-pin`);
       await expect(pinItem).toHaveText("Pin tab");
-      await page.screenshot({ path: `${QA_DIR}/01-pin-tab-menu.png`, fullPage: false });
+      await page.screenshot({ path: testInfo.outputPath("01-pin-tab-menu.png"), fullPage: false });
       await pinItem.click();
 
       await expect(pinGlyph(pinned.tab)).toBeVisible({ timeout: 10_000 });
       await expect(page.locator('[data-testid^="workspace-tab-terminal_"]:visible')).toHaveCount(3);
-      await page.screenshot({ path: `${QA_DIR}/02-pinned-tab-row.png`, fullPage: false });
+      await page.screenshot({
+        path: testInfo.outputPath("02-pinned-tab-row.png"),
+        fullPage: false,
+      });
 
-      await acceptCloseOtherTabs(page, pinned);
+      await acceptCloseOtherTabs(page, anchor);
 
       await expect(pinned.tab).toBeVisible();
       await expect(pinGlyph(pinned.tab)).toBeVisible();
-      await expect(anchor.tab).toHaveCount(0, { timeout: 30_000 });
+      await expect(anchor.tab).toBeVisible();
       await expect(disposable.tab).toHaveCount(0, { timeout: 30_000 });
-      await expect(page.locator('[data-testid^="workspace-tab-terminal_"]:visible')).toHaveCount(1);
+      await expect(page.locator('[data-testid^="workspace-tab-terminal_"]:visible')).toHaveCount(2);
       await page.screenshot({
-        path: `${QA_DIR}/03-close-others-pinned-survives.png`,
+        path: testInfo.outputPath("03-close-others-pinned-survives.png"),
         fullPage: false,
       });
 
@@ -107,9 +106,8 @@ test.describe("Pinned workspace tabs", () => {
       await unpinItem.click();
       await expect(pinGlyph(pinned.tab)).toHaveCount(0);
 
-      const unpinnedAnchor = await openTerminalTab(page, workspace);
-      await acceptCloseOtherTabs(page, unpinnedAnchor);
-      await expect(unpinnedAnchor.tab).toBeVisible();
+      await acceptCloseOtherTabs(page, anchor);
+      await expect(anchor.tab).toBeVisible();
       await expect(pinned.tab).toHaveCount(0, { timeout: 30_000 });
     } finally {
       await workspace.cleanup();
