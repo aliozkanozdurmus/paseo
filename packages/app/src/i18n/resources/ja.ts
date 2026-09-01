@@ -1082,6 +1082,7 @@ export const ja: TranslationResources = {
       clear: "フィルターをクリア",
     },
     pinned: {
+      ...en.sidebar.pinned,
       title: "固定済み",
     },
     host: {

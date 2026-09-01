@@ -1086,6 +1086,7 @@ export const ru: TranslationResources = {
       clear: "Очистить фильтры",
     },
     pinned: {
+      ...en.sidebar.pinned,
       title: "Закреплённые",
     },
     host: {

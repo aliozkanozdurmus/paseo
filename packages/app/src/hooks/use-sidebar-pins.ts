@@ -6,7 +6,9 @@ import type {
   SidebarWorkspacePlacement,
 } from "@/hooks/use-sidebar-workspaces-list";
 import { applyStoredOrdering } from "@/hooks/sidebar-workspaces-view-model";
+import { useHostFeatureMap } from "@/runtime/host-features";
 import { useSessionStore } from "@/stores/session-store";
+import { useSidebarViewStore } from "@/stores/sidebar-view-store";
 
 export interface PinnedSidebarKeys {
   pinnedWorkspaceKeys: string[];
@@ -34,19 +36,32 @@ function projectWithoutPinnedWorkspaces(
   return workspaces.length === project.workspaces.length ? project : { ...project, workspaces };
 }
 
-function buildPinnedSidebarKeys(
-  projects: SidebarProjectEntry[],
-  workspaceMaps: ReadonlyMap<string, ReadonlyMap<string, { pinnedAt?: string | null }>>,
-): PinnedSidebarKeys {
+interface WorkspacePinFields {
+  pinnedAt?: string | null;
+  pinGroupId?: string | null;
+}
+
+export function buildPinnedSidebarKeys(input: {
+  projects: SidebarProjectEntry[];
+  workspaceMaps: ReadonlyMap<string, ReadonlyMap<string, WorkspacePinFields>>;
+  supportsPinGroupsByServerId: ReadonlyMap<string, boolean>;
+  activePinGroupId: string;
+}): PinnedSidebarKeys {
   const pinnedWorkspaceKeys: string[] = [];
   const pinnedAtByKey: Record<string, string> = {};
 
-  for (const project of projects) {
+  for (const project of input.projects) {
     for (const placement of project.workspaces) {
-      const workspace = workspaceMaps.get(placement.serverId)?.get(placement.workspaceId);
-      if (workspace?.pinnedAt) {
+      const workspace = input.workspaceMaps.get(placement.serverId)?.get(placement.workspaceId);
+      const supportsPinGroups = input.supportsPinGroupsByServerId.get(placement.serverId) === true;
+      const isPinned = supportsPinGroups
+        ? workspace?.pinGroupId === input.activePinGroupId
+        : workspace?.pinnedAt != null;
+      if (isPinned) {
         pinnedWorkspaceKeys.push(placement.workspaceKey);
-        pinnedAtByKey[placement.workspaceKey] = workspace.pinnedAt;
+        if (workspace?.pinnedAt) {
+          pinnedAtByKey[placement.workspaceKey] = workspace.pinnedAt;
+        }
       }
     }
   }
@@ -83,16 +98,15 @@ export function usePinnedSidebarKeys(projects: SidebarProjectEntry[]): PinnedSid
       ),
     [projects],
   );
+  const supportsPinGroupsByServerId = useHostFeatureMap(serverIds, "workspacePinGroups");
+  const activePinGroupId = useSidebarViewStore((state) => state.activePinGroupId);
   const workspaceMaps = useStoreWithEqualityFn(
     useSessionStore,
     (state) => serverIds.map((serverId) => state.sessions[serverId]?.workspaces ?? null),
     shallow,
   );
   return useMemo(() => {
-    const workspaceMapByServerId = new Map<
-      string,
-      ReadonlyMap<string, { pinnedAt?: string | null }>
-    >();
+    const workspaceMapByServerId = new Map<string, ReadonlyMap<string, WorkspacePinFields>>();
     for (let index = 0; index < serverIds.length; index += 1) {
       const serverId = serverIds[index];
       const workspaceMap = workspaceMaps[index];
@@ -100,13 +114,18 @@ export function usePinnedSidebarKeys(projects: SidebarProjectEntry[]): PinnedSid
         workspaceMapByServerId.set(serverId, workspaceMap);
       }
     }
-    const nextKeys = buildPinnedSidebarKeys(projects, workspaceMapByServerId);
+    const nextKeys = buildPinnedSidebarKeys({
+      projects,
+      workspaceMaps: workspaceMapByServerId,
+      supportsPinGroupsByServerId,
+      activePinGroupId,
+    });
     if (arePinnedSidebarKeysEqual(previousKeysRef.current, nextKeys)) {
       return previousKeysRef.current;
     }
     previousKeysRef.current = nextKeys;
     return nextKeys;
-  }, [projects, serverIds, workspaceMaps]);
+  }, [activePinGroupId, projects, serverIds, supportsPinGroupsByServerId, workspaceMaps]);
 }
 
 // Splits the sidebar into a dedicated Pinned section (chats) and the regular list below.

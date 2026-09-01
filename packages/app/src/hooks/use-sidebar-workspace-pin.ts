@@ -4,12 +4,16 @@ import { useMutation } from "@tanstack/react-query";
 import { useToast } from "@/contexts/toast-context";
 import type { SidebarWorkspaceEntry } from "@/hooks/use-sidebar-workspaces-list";
 import { getHostRuntimeStore } from "@/runtime/host-runtime";
+import { hostSupportsFeature } from "@/runtime/host-features";
+import { useSessionStore } from "@/stores/session-store";
+import { useSidebarViewStore } from "@/stores/sidebar-view-store";
+import { planWorkspacePinMutation } from "@/workspace-pin-groups/menu-model";
 
 // Everything the pin toggle actually needs. Kept narrower than SidebarWorkspaceEntry so the
 // global keyboard handler can build one from the active route selection without a sidebar row.
 export type PinnableWorkspace = Pick<
   SidebarWorkspaceEntry,
-  "serverId" | "workspaceId" | "workspaceKey" | "pinnedAt"
+  "serverId" | "workspaceId" | "workspaceKey" | "pinnedAt" | "pinGroupId"
 >;
 
 export type ToggleSidebarWorkspacePin = (workspace: PinnableWorkspace) => void;
@@ -26,15 +30,17 @@ export function useSidebarWorkspacePinController(): ToggleSidebarWorkspacePin {
     mutationFn: async ({
       workspace,
       pinned,
+      groupId,
     }: {
       workspace: PinnableWorkspace;
       pinned: boolean;
+      groupId: string;
     }) => {
       const client = getHostRuntimeStore().getClient(workspace.serverId);
       if (!client) {
         throw new Error(t("sidebar.workspace.toasts.hostDisconnected"));
       }
-      await client.setWorkspacePinned(workspace.workspaceId, pinned);
+      await client.setWorkspacePinned(workspace.workspaceId, pinned, groupId);
     },
     onError: (error) => {
       toast.error(
@@ -52,9 +58,22 @@ export function useSidebarWorkspacePinController(): ToggleSidebarWorkspacePin {
       if (pendingWorkspaceKeys.has(workspace.workspaceKey)) {
         return;
       }
+      const serverInfo = useSessionStore.getState().sessions[workspace.serverId]?.serverInfo;
+      const supportsPinGroups = hostSupportsFeature(serverInfo, "workspacePinGroups");
+      const activeGroupId = useSidebarViewStore.getState().activePinGroupId;
+      const plan = planWorkspacePinMutation({
+        pinnedAt: workspace.pinnedAt,
+        pinGroupId: workspace.pinGroupId,
+        activeGroupId,
+        supportsPinGroups,
+      });
+      if (plan.kind === "unsupported") {
+        toast.error(t("sidebar.pinned.groups.updateHost"));
+        return;
+      }
       pendingWorkspaceKeys.add(workspace.workspaceKey);
-      mutate({ workspace, pinned: workspace.pinnedAt == null });
+      mutate({ workspace, pinned: plan.pinned, groupId: plan.groupId });
     },
-    [mutate],
+    [mutate, t, toast],
   );
 }

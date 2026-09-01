@@ -3,7 +3,7 @@ import type {
   SidebarProjectEntry,
   SidebarWorkspacePlacement,
 } from "@/hooks/sidebar-workspaces-view-model";
-import { splitPinnedSidebarGroups } from "@/hooks/use-sidebar-pins";
+import { buildPinnedSidebarKeys, splitPinnedSidebarGroups } from "@/hooks/use-sidebar-pins";
 
 function placement(workspaceKey: string): SidebarWorkspacePlacement {
   return {
@@ -109,5 +109,51 @@ describe("splitPinnedSidebarGroups", () => {
       "older",
       "newer",
     ]);
+  });
+});
+
+describe("buildPinnedSidebarKeys", () => {
+  it("keeps only workspaces in the active group on hosts that support pin groups", () => {
+    const projects = [project("p1", [placement("active"), placement("other"), placement("none")])];
+    const workspaceMaps = new Map([
+      [
+        "s1",
+        new Map([
+          ["active", { pinnedAt: null, pinGroupId: "team" }],
+          ["other", { pinnedAt: "2026-02-01T00:00:00Z", pinGroupId: "review" }],
+          ["none", { pinnedAt: null, pinGroupId: null }],
+        ]),
+      ],
+    ]);
+
+    expect(
+      buildPinnedSidebarKeys({
+        projects,
+        workspaceMaps,
+        supportsPinGroupsByServerId: new Map([["s1", true]]),
+        activePinGroupId: "team",
+      }),
+    ).toEqual({
+      pinnedWorkspaceKeys: ["active"],
+      pinnedAtByKey: {},
+    });
+  });
+
+  it("keeps legacy pinned workspaces on hosts without pin groups", () => {
+    const projects = [project("p1", [placement("legacy")])];
+
+    expect(
+      buildPinnedSidebarKeys({
+        projects,
+        workspaceMaps: new Map([
+          ["s1", new Map([["legacy", { pinnedAt: "2026-01-01T00:00:00Z" }]])],
+        ]),
+        supportsPinGroupsByServerId: new Map([["s1", false]]),
+        activePinGroupId: "team",
+      }),
+    ).toEqual({
+      pinnedWorkspaceKeys: ["legacy"],
+      pinnedAtByKey: { legacy: "2026-01-01T00:00:00Z" },
+    });
   });
 });

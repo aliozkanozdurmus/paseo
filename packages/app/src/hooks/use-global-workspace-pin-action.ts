@@ -30,8 +30,9 @@ export function useGlobalWorkspacePinAction() {
   const fields = useWorkspaceFields(serverId, routeWorkspaceId, (workspace) => ({
     id: workspace.id,
     pinnedAt: workspace.pinnedAt ?? null,
+    pinGroupId: workspace.pinGroupId ?? null,
   }));
-  const canPin = useHostFeature(serverId, "workspacePinning");
+  const canPin = useHostFeature(serverId, "workspacePinGroups");
   const togglePin = useSidebarWorkspacePinController();
 
   const handle = useCallback(() => {
@@ -50,6 +51,7 @@ export function useGlobalWorkspacePinAction() {
       workspaceId: fields.id,
       workspaceKey,
       pinnedAt: fields.pinnedAt,
+      pinGroupId: fields.pinGroupId,
     });
     return true;
   }, [canPin, fields, serverId, togglePin]);

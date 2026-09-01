@@ -1104,6 +1104,7 @@ export const fr: TranslationResources = {
       clear: "Effacer les filtres",
     },
     pinned: {
+      ...en.sidebar.pinned,
       title: "Épinglés",
     },
     host: {

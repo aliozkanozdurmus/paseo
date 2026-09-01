@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { StateStorage } from "zustand/middleware";
 import {
   createSidebarViewStorage,
+  DEFAULT_WORKSPACE_PIN_GROUP_ID,
   hasActiveSidebarLabelFilter,
   migrateSidebarViewState,
   SIDEBAR_UNLABELLED_LABEL_KEY,
@@ -41,6 +42,7 @@ describe("sidebar view store", () => {
   beforeEach(() => {
     useSidebarViewStore.setState({
       groupMode: "project",
+      activePinGroupId: DEFAULT_WORKSPACE_PIN_GROUP_ID,
       hostFilters: [],
       projectFilters: [],
       labelFilter: { labels: [] },
@@ -93,6 +95,7 @@ describe("sidebar view store", () => {
       }),
     ).toEqual({
       groupMode: "status",
+      activePinGroupId: DEFAULT_WORKSPACE_PIN_GROUP_ID,
       hostFilters: [],
       projectFilters: [],
       labelFilter: { labels: [] },
@@ -107,6 +110,7 @@ describe("sidebar view store", () => {
       }),
     ).toEqual({
       groupMode: "status",
+      activePinGroupId: DEFAULT_WORKSPACE_PIN_GROUP_ID,
       hostFilters: ["host-a"],
       projectFilters: [],
       labelFilter: { labels: [] },
@@ -121,6 +125,7 @@ describe("sidebar view store", () => {
       }),
     ).toEqual({
       groupMode: "status",
+      activePinGroupId: DEFAULT_WORKSPACE_PIN_GROUP_ID,
       hostFilters: ["host-a", "host-b"],
       projectFilters: [],
       labelFilter: { labels: [] },
@@ -231,6 +236,7 @@ describe("sidebar view store", () => {
       }),
     ).toEqual({
       groupMode: "project",
+      activePinGroupId: DEFAULT_WORKSPACE_PIN_GROUP_ID,
       hostFilters: ["host-a"],
       projectFilters: ["project-a", "project-b"],
       labelFilter: { labels: [] },
@@ -240,6 +246,7 @@ describe("sidebar view store", () => {
   it("never keeps project filters from state the schema rejects", () => {
     expect(migrateSidebarViewState({ projectFilters: "project-a" })).toEqual({
       groupMode: "project",
+      activePinGroupId: DEFAULT_WORKSPACE_PIN_GROUP_ID,
       hostFilters: [],
       projectFilters: [],
       labelFilter: { labels: [] },
@@ -287,5 +294,34 @@ describe("sidebar view store", () => {
       }),
     );
     expect(storage.reads).toEqual(["sidebar-view"]);
+  });
+
+  it("defaults legacy state to the default pin group", () => {
+    expect(migrateSidebarViewState({ groupMode: "status" }).activePinGroupId).toBe(
+      DEFAULT_WORKSPACE_PIN_GROUP_ID,
+    );
+  });
+
+  it("persists and normalizes the active pin group", () => {
+    expect(
+      migrateSidebarViewState({ groupMode: "project", activePinGroupId: " team " })
+        .activePinGroupId,
+    ).toBe("team");
+
+    useSidebarViewStore.getState().setActivePinGroupId(" review ");
+    expect(useSidebarViewStore.getState().activePinGroupId).toBe("review");
+
+    useSidebarViewStore.getState().setActivePinGroupId(" ");
+    expect(useSidebarViewStore.getState().activePinGroupId).toBe(DEFAULT_WORKSPACE_PIN_GROUP_ID);
+  });
+
+  it("includes the active pin group in persisted device state", () => {
+    useSidebarViewStore.getState().setActivePinGroupId("team");
+
+    const partialize = useSidebarViewStore.persist.getOptions().partialize;
+
+    expect(partialize?.(useSidebarViewStore.getState())).toMatchObject({
+      activePinGroupId: "team",
+    });
   });
 });
