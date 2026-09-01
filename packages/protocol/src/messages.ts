@@ -3877,6 +3877,8 @@ export const WorkspaceDescriptorPayloadSchema = z
     pinnedAt: z.string().nullable().optional(),
     // COMPAT(workspacePinGroups): added in v0.7.0, remove optional after 2027-03-01.
     pinGroupId: z.string().nullable().optional(),
+    // COMPAT(workspacePinGroups): added in v0.7.0, remove optional after 2027-03-01.
+    pinGroupAssignedAt: z.string().nullable().optional(),
     // COMPAT(workspaceLabels): added in v0.5.0, remove optional after 2027-08-14.
     labels: z.array(z.string()).optional(),
     archivingAt: z.string().nullable().optional().default(null),
@@ -4079,6 +4081,10 @@ export const WorkspaceUpdateMessageSchema = z.object({
     z.object({
       kind: z.literal("upsert"),
       workspace: WorkspaceDescriptorPayloadSchema,
+      // Uncorrelated catalog invalidation rides the existing workspace update channel so old
+      // clients can parse and ignore it. New clients replace their host-local catalog cache.
+      // COMPAT(workspacePinGroups): added in v0.7.0, remove optional after 2027-03-01.
+      pinGroups: z.array(WorkspacePinGroupSchema).optional(),
       generation: z.string().optional(),
       seq: z.number().int().positive().optional(),
     }),
@@ -4095,6 +4101,8 @@ export const WorkspaceUpdateMessageSchema = z.object({
       // Project removal is represented on the existing workspace update channel
       // so old clients can still parse the message and ignore the extra field.
       removedProjectId: z.string().optional(),
+      // COMPAT(workspacePinGroups): added in v0.7.0, remove optional after 2027-03-01.
+      pinGroups: z.array(WorkspacePinGroupSchema).optional(),
       generation: z.string().optional(),
       seq: z.number().int().positive().optional(),
     }),

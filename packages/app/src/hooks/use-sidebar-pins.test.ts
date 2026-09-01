@@ -37,7 +37,7 @@ describe("splitPinnedSidebarGroups", () => {
       projects,
       keys: {
         pinnedWorkspaceKeys: ["w1"],
-        pinnedAtByKey: { w1: "2026-01-01T00:00:00Z" },
+        pinAssignedAtByKey: { w1: "2026-01-01T00:00:00Z" },
       },
       pinnedWorkspaceOrder: [],
     });
@@ -49,7 +49,7 @@ describe("splitPinnedSidebarGroups", () => {
     const projects = [project("p1", [])];
     const result = splitPinnedSidebarGroups({
       projects,
-      keys: { pinnedWorkspaceKeys: [], pinnedAtByKey: {} },
+      keys: { pinnedWorkspaceKeys: [], pinAssignedAtByKey: {} },
       pinnedWorkspaceOrder: [],
     });
     expect(result.unpinnedProjects).toHaveLength(1);
@@ -61,7 +61,7 @@ describe("splitPinnedSidebarGroups", () => {
       projects,
       keys: {
         pinnedWorkspaceKeys: ["w1"],
-        pinnedAtByKey: { w1: "2026-01-01T00:00:00Z" },
+        pinAssignedAtByKey: { w1: "2026-01-01T00:00:00Z" },
       },
       pinnedWorkspaceOrder: [],
     });
@@ -75,7 +75,7 @@ describe("splitPinnedSidebarGroups", () => {
       projects,
       keys: {
         pinnedWorkspaceKeys: ["older", "newer"],
-        pinnedAtByKey: {
+        pinAssignedAtByKey: {
           older: "2026-01-01T00:00:00Z",
           newer: "2026-02-01T00:00:00Z",
         },
@@ -95,7 +95,7 @@ describe("splitPinnedSidebarGroups", () => {
       projects,
       keys: {
         pinnedWorkspaceKeys: ["older", "newer", "new"],
-        pinnedAtByKey: {
+        pinAssignedAtByKey: {
           older: "2026-01-01T00:00:00Z",
           newer: "2026-02-01T00:00:00Z",
           new: "2026-03-01T00:00:00Z",
@@ -119,9 +119,9 @@ describe("buildPinnedSidebarKeys", () => {
       [
         "s1",
         new Map([
-          ["active", { pinnedAt: null, pinGroupId: "team" }],
-          ["other", { pinnedAt: "2026-02-01T00:00:00Z", pinGroupId: "review" }],
-          ["none", { pinnedAt: null, pinGroupId: null }],
+          ["active", { pinGroupId: "team", pinGroupAssignedAt: "2026-03-01T00:00:00Z" }],
+          ["other", { pinGroupId: "review", pinGroupAssignedAt: "2026-02-01T00:00:00Z" }],
+          ["none", { pinGroupId: null, pinGroupAssignedAt: null }],
         ]),
       ],
     ]);
@@ -131,31 +131,27 @@ describe("buildPinnedSidebarKeys", () => {
         projects,
         workspaceMaps,
         supportsPinGroupsByServerId: new Map([["s1", true]]),
-        activePinGroupId: "team",
-        activePinGroupServerId: "s1",
+        activePinGroup: { groupId: "team", serverId: "s1" },
       }),
     ).toEqual({
       pinnedWorkspaceKeys: ["active"],
-      pinnedAtByKey: {},
+      pinAssignedAtByKey: { active: "2026-03-01T00:00:00Z" },
     });
   });
 
-  it("keeps legacy pinned workspaces in the default group", () => {
+  it("does not fall back to legacy pinnedAt when pin groups are unavailable", () => {
     const projects = [project("p1", [placement("legacy")])];
 
     expect(
       buildPinnedSidebarKeys({
         projects,
-        workspaceMaps: new Map([
-          ["s1", new Map([["legacy", { pinnedAt: "2026-01-01T00:00:00Z" }]])],
-        ]),
+        workspaceMaps: new Map([["s1", new Map([["legacy", { pinGroupId: "default" }]])]]),
         supportsPinGroupsByServerId: new Map([["s1", false]]),
-        activePinGroupId: "default",
-        activePinGroupServerId: null,
+        activePinGroup: { groupId: "default", serverId: "s1" },
       }),
     ).toEqual({
-      pinnedWorkspaceKeys: ["legacy"],
-      pinnedAtByKey: { legacy: "2026-01-01T00:00:00Z" },
+      pinnedWorkspaceKeys: [],
+      pinAssignedAtByKey: {},
     });
   });
 
@@ -175,12 +171,35 @@ describe("buildPinnedSidebarKeys", () => {
           ["host-a", true],
           ["host-b", true],
         ]),
-        activePinGroupId: "team",
-        activePinGroupServerId: "host-a",
+        activePinGroup: { groupId: "team", serverId: "host-a" },
       }),
     ).toEqual({
       pinnedWorkspaceKeys: ["host-a-team"],
-      pinnedAtByKey: {},
+      pinAssignedAtByKey: {},
+    });
+  });
+
+  it("keeps the default group isolated to its selected host", () => {
+    const projects = [
+      project("p1", [placement("host-a-default", "host-a"), placement("host-b-default", "host-b")]),
+    ];
+
+    expect(
+      buildPinnedSidebarKeys({
+        projects,
+        workspaceMaps: new Map([
+          ["host-a", new Map([["host-a-default", { pinGroupId: "default" }]])],
+          ["host-b", new Map([["host-b-default", { pinGroupId: "default" }]])],
+        ]),
+        supportsPinGroupsByServerId: new Map([
+          ["host-a", true],
+          ["host-b", true],
+        ]),
+        activePinGroup: { groupId: "default", serverId: "host-b" },
+      }),
+    ).toEqual({
+      pinnedWorkspaceKeys: ["host-b-default"],
+      pinAssignedAtByKey: {},
     });
   });
 });

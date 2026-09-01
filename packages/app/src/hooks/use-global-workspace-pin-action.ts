@@ -2,11 +2,11 @@ import { useCallback } from "react";
 import { useKeyboardActionHandler } from "@/hooks/use-keyboard-action-handler";
 import { useSidebarWorkspacePinController } from "@/hooks/use-sidebar-workspace-pin";
 import type { KeyboardActionId } from "@/keyboard/keyboard-action-dispatcher";
-import { useHostFeature } from "@/runtime/host-features";
+import { useHostFeatureAvailability } from "@/runtime/host-features";
 import { useActiveWorkspaceSelection } from "@/stores/navigation-active-workspace-store";
 import { useSidebarViewStore } from "@/stores/sidebar-view-store";
 import { useWorkspaceFields } from "@/stores/session-store-hooks";
-import { canWorkspaceUseActivePinGroup } from "@/workspace-pin-groups/menu-model";
+import { resolveWorkspacePinAction } from "@/workspace-pin-groups/menu-model";
 import { buildWorkspaceTabPersistenceKey } from "@/workspace-tabs/model";
 
 const WORKSPACE_PIN_ACTIONS: readonly KeyboardActionId[] = ["workspace.pin"];
@@ -34,21 +34,17 @@ export function useGlobalWorkspacePinAction() {
     pinnedAt: workspace.pinnedAt ?? null,
     pinGroupId: workspace.pinGroupId ?? null,
   }));
-  const supportsPinGroups = useHostFeature(serverId, "workspacePinGroups");
-  const supportsLegacyPinning = useHostFeature(serverId, "workspacePinning");
-  const activePinGroupId = useSidebarViewStore((state) => state.activePinGroupId);
-  const activePinGroupServerId = useSidebarViewStore((state) => state.activePinGroupServerId);
-  const canPin = canWorkspaceUseActivePinGroup({
+  const activePinGroup = useSidebarViewStore((state) => state.activePinGroup);
+  const pinGroupAvailability = useHostFeatureAvailability(serverId, "workspacePinGroups");
+  const pinAction = resolveWorkspacePinAction({
     workspaceServerId: serverId,
-    supportsPinGroups,
-    supportsLegacyPinning,
-    activeGroupId: activePinGroupId,
-    activeGroupServerId: activePinGroupServerId,
+    pinGroupAvailability,
+    activePinGroup,
   });
   const togglePin = useSidebarWorkspacePinController();
 
   const handle = useCallback(() => {
-    if (!serverId || !fields || !canPin) {
+    if (!serverId || !fields || pinAction.kind === "unavailable") {
       return false;
     }
     const workspaceKey = buildWorkspaceTabPersistenceKey({
@@ -58,20 +54,23 @@ export function useGlobalWorkspacePinAction() {
     if (!workspaceKey) {
       return false;
     }
-    togglePin({
-      serverId,
-      workspaceId: fields.id,
-      workspaceKey,
-      pinnedAt: fields.pinnedAt,
-      pinGroupId: fields.pinGroupId,
-    });
+    togglePin(
+      {
+        serverId,
+        workspaceId: fields.id,
+        workspaceKey,
+        pinnedAt: fields.pinnedAt,
+        pinGroupId: fields.pinGroupId,
+      },
+      pinAction,
+    );
     return true;
-  }, [canPin, fields, serverId, togglePin]);
+  }, [fields, pinAction, serverId, togglePin]);
 
   useKeyboardActionHandler({
     handlerId: "workspace-pin-global",
     actions: WORKSPACE_PIN_ACTIONS,
-    enabled: serverId !== null && fields !== null && canPin,
+    enabled: serverId !== null && fields !== null && pinAction.kind !== "unavailable",
     priority: 0,
     handle,
   });

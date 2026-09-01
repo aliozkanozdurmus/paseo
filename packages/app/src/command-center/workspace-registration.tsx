@@ -33,7 +33,7 @@ import { useWorkspaceClipboardActions } from "@/hooks/use-workspace-clipboard-ac
 import { useToast } from "@/contexts/toast-context";
 import { type ShortcutOverrides } from "@/keyboard/keyboard-shortcuts";
 import { useKeyboardActionDispatcher } from "@/keyboard/keyboard-action-dispatcher-context";
-import { useHostFeature } from "@/runtime/host-features";
+import { useHostFeatureAvailability } from "@/runtime/host-features";
 import { useActiveWorkspaceSelection } from "@/stores/navigation-active-workspace-store";
 import { useSidebarViewStore } from "@/stores/sidebar-view-store";
 import { useWorkspaceDirectory, useWorkspaceFields } from "@/stores/session-store-hooks";
@@ -55,8 +55,9 @@ import {
 import { getLabelCommandCenterIcon } from "@/workspace-labels/command-center-icon";
 import { buildWorkspaceTabPersistenceKey } from "@/workspace-tabs/model";
 import {
-  canWorkspaceUseActivePinGroup,
   isWorkspacePinnedInGroup,
+  resolveWorkspacePinAction,
+  type WorkspacePinAction,
 } from "@/workspace-pin-groups/menu-model";
 import { getCommandCenterIcon } from "./icon";
 import type { CommandCenterIcon } from "./contributions";
@@ -97,14 +98,14 @@ const WORKSPACE_COMMAND_CENTER_ICONS = {
 };
 
 function isWorkspacePinnedForCommandCenter(
-  fields: Pick<WorkspaceDescriptor, "pinnedAt" | "pinGroupId"> | null,
-  activeGroupId: string,
-  supportsPinGroups: boolean,
-  canPin: boolean,
+  fields: Pick<WorkspaceDescriptor, "pinGroupId"> | null,
+  pinAction: WorkspacePinAction,
 ): boolean {
-  if (!fields || !canPin) return false;
-  if (!supportsPinGroups) return fields.pinnedAt != null;
-  return isWorkspacePinnedInGroup({ pinGroupId: fields.pinGroupId, activeGroupId });
+  if (!fields || pinAction.kind !== "set-membership") return false;
+  return isWorkspacePinnedInGroup({
+    pinGroupId: fields.pinGroupId,
+    activeGroupId: pinAction.selection.groupId,
+  });
 }
 
 const OPEN_PANEL_LABEL_KEYS = {
@@ -210,24 +211,16 @@ export function useWorkspaceCommandCenterActions(): void {
   }));
   const cwd = useWorkspaceDirectory(serverId, workspaceId);
   const currentBranch = fields?.currentBranch ?? null;
-  const supportsPinGroups = useHostFeature(serverId, "workspacePinGroups");
-  const supportsLegacyPinning = useHostFeature(serverId, "workspacePinning");
-  const activePinGroupId = useSidebarViewStore((state) => state.activePinGroupId);
-  const activePinGroupServerId = useSidebarViewStore((state) => state.activePinGroupServerId);
+  const pinGroupAvailability = useHostFeatureAvailability(serverId, "workspacePinGroups");
+  const activePinGroup = useSidebarViewStore((state) => state.activePinGroup);
   const isCompact = useIsCompactFormFactor();
-  const canPin = canWorkspaceUseActivePinGroup({
+  const pinAction = resolveWorkspacePinAction({
     workspaceServerId: serverId,
-    supportsPinGroups,
-    supportsLegacyPinning,
-    activeGroupId: activePinGroupId,
-    activeGroupServerId: activePinGroupServerId,
+    pinGroupAvailability,
+    activePinGroup,
   });
-  const isPinned = isWorkspacePinnedForCommandCenter(
-    fields,
-    activePinGroupId,
-    supportsPinGroups,
-    canPin,
-  );
+  const canPin = pinAction.kind !== "unavailable";
+  const isPinned = isWorkspacePinnedForCommandCenter(fields, pinAction);
   const persistenceKey =
     serverId && fields
       ? buildWorkspaceTabPersistenceKey({ serverId, workspaceId: fields.id })

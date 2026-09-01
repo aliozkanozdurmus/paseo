@@ -1,8 +1,17 @@
 import os from "node:os";
 import path from "node:path";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 
 import { beforeEach, afterEach, describe, expect, test } from "vitest";
+import { z } from "zod";
 
 import { createTestLogger } from "../test-utils/test-logger.js";
 import { writeJsonFileAtomic } from "./atomic-file.js";
@@ -574,16 +583,395 @@ describe("workspace registries", () => {
       pinGroupId: DEFAULT_WORKSPACE_PIN_GROUP_ID,
       pinnedAt: "2026-03-02T00:00:00.000Z",
     });
-    expect(JSON.parse(readFileSync(filePath, "utf8"))).toMatchObject({
-      workspaces: [
-        {
-          workspaceId: "ws-pinned",
-          pinGroupId: DEFAULT_WORKSPACE_PIN_GROUP_ID,
-          pinnedAt: "2026-03-02T00:00:00.000Z",
+    expect(JSON.parse(readFileSync(filePath, "utf8"))).toMatchObject([
+      {
+        workspaceId: "ws-pinned",
+        pinnedAt: "2026-03-02T00:00:00.000Z",
+      },
+    ]);
+    expect(
+      JSON.parse(
+        readFileSync(path.join(tmpDir, "projects", "legacy-workspaces.pin-groups.json"), "utf8"),
+      ),
+    ).toMatchObject({
+      groups: [{ id: DEFAULT_WORKSPACE_PIN_GROUP_ID, name: "Pinned" }],
+      memberships: {
+        "ws-pinned": {
+          groupId: DEFAULT_WORKSPACE_PIN_GROUP_ID,
+          assignedAt: "2026-03-02T00:00:00.000Z",
         },
-      ],
-      pinGroups: [{ id: DEFAULT_WORKSPACE_PIN_GROUP_ID, name: "Pinned" }],
+      },
     });
+  });
+
+  test("keeps workspaces.json readable by the legacy array reader after pin-group writes", async () => {
+    const filePath = path.join(tmpDir, "projects", "workspaces.json");
+    const registry = new FileBackedWorkspaceRegistry(filePath, logger, {
+      pinGroupIdFactory: () => "pgrp_focus",
+      now: () => "2026-08-31T12:00:00.000Z",
+    });
+    await registry.initialize();
+    await registry.upsert(
+      createPersistedWorkspaceRecord({
+        workspaceId: "ws-survives-downgrade",
+        projectId: "proj-1",
+        cwd: "/tmp/survives-downgrade",
+        kind: "directory",
+        displayName: "survives-downgrade",
+        createdAt: "2026-08-31T12:00:00.000Z",
+        updatedAt: "2026-08-31T12:00:00.000Z",
+      }),
+    );
+    const focus = await registry.createPinGroup("Focus");
+    await registry.setWorkspacePinGroup({
+      workspaceId: "ws-survives-downgrade",
+      groupId: focus.id,
+      updatedAt: "2026-08-31T13:00:00.000Z",
+    });
+
+    // This is the ecec33265 reader shape: an array of complete workspace records with no
+    // knowledge of pin-group fields or a registry envelope.
+    const legacyArrayReader = z.array(
+      z.object({
+        workspaceId: z.string(),
+        projectId: z.string(),
+        cwd: z.string(),
+        kind: z.enum(["local_checkout", "worktree", "directory"]),
+        displayName: z.string(),
+        title: z.string().nullable().optional(),
+        branch: z.string().nullable().optional(),
+        worktreeRoot: z.string().nullable(),
+        baseBranch: z.string().nullable().optional(),
+        isPaseoOwnedWorktree: z.boolean(),
+        mainRepoRoot: z.string().nullable(),
+        createdAt: z.string(),
+        updatedAt: z.string(),
+        archivedAt: z.string().nullable(),
+        autoArchivedChangeRequestUrl: z.string().nullable().optional(),
+        pinnedAt: z.string().nullable().optional(),
+        labels: z.array(z.string()).optional(),
+      }),
+    );
+    const legacyWorkspaces = legacyArrayReader.parse(JSON.parse(readFileSync(filePath, "utf8")));
+    expect(legacyWorkspaces).toEqual([
+      expect.objectContaining({
+        workspaceId: "ws-survives-downgrade",
+        projectId: "proj-1",
+        pinnedAt: null,
+      }),
+    ]);
+  });
+
+  test("moves the pre-release workspace envelope into the downgrade-safe sidecar", async () => {
+    const filePath = path.join(tmpDir, "projects", "envelope-workspaces.json");
+    mkdirSync(path.dirname(filePath), { recursive: true });
+    const workspace = createPersistedWorkspaceRecord({
+      workspaceId: "ws-envelope",
+      projectId: "proj-1",
+      cwd: "/tmp/envelope",
+      kind: "directory",
+      displayName: "envelope",
+      createdAt: "2026-08-31T12:00:00.000Z",
+      updatedAt: "2026-08-31T13:00:00.000Z",
+      pinGroupId: "pgrp-focus",
+    });
+    writeFileSync(
+      filePath,
+      JSON.stringify({
+        workspaces: [workspace],
+        pinGroups: [
+          {
+            id: DEFAULT_WORKSPACE_PIN_GROUP_ID,
+            name: "Pinned",
+            createdAt: "2026-08-31T12:00:00.000Z",
+          },
+          {
+            id: "pgrp-focus",
+            name: "Focus",
+            createdAt: "2026-08-31T12:01:00.000Z",
+          },
+        ],
+      }),
+    );
+
+    const registry = new FileBackedWorkspaceRegistry(filePath, logger);
+    await registry.initialize();
+
+    expect(JSON.parse(readFileSync(filePath, "utf8"))).toEqual([
+      expect.objectContaining({ workspaceId: "ws-envelope", pinnedAt: null }),
+    ]);
+    expect(
+      JSON.parse(
+        readFileSync(path.join(tmpDir, "projects", "envelope-workspaces.pin-groups.json"), "utf8"),
+      ),
+    ).toMatchObject({
+      groups: [{ id: DEFAULT_WORKSPACE_PIN_GROUP_ID }, { id: "pgrp-focus", name: "Focus" }],
+      memberships: {
+        "ws-envelope": {
+          groupId: "pgrp-focus",
+          assignedAt: "2026-08-31T13:00:00.000Z",
+        },
+      },
+    });
+  });
+
+  test("refuses corrupt workspace bytes without overwriting them", async () => {
+    const filePath = path.join(tmpDir, "projects", "corrupt-workspaces.json");
+    mkdirSync(path.dirname(filePath), { recursive: true });
+    const corruptBytes = '{"workspaceId":"truncated"';
+    writeFileSync(filePath, corruptBytes);
+    const registry = new FileBackedWorkspaceRegistry(filePath, logger);
+
+    await expect(registry.initialize()).rejects.toThrow();
+    await expect(
+      registry.upsert(
+        createPersistedWorkspaceRecord({
+          workspaceId: "ws-must-not-write",
+          projectId: "proj-1",
+          cwd: "/tmp/must-not-write",
+          kind: "directory",
+          displayName: "must-not-write",
+          createdAt: "2026-08-31T12:00:00.000Z",
+          updatedAt: "2026-08-31T12:00:00.000Z",
+        }),
+      ),
+    ).rejects.toThrow();
+    expect(readFileSync(filePath, "utf8")).toBe(corruptBytes);
+  });
+
+  test("refuses corrupt pin-group sidecar bytes without overwriting either file", async () => {
+    const filePath = path.join(tmpDir, "projects", "workspaces.json");
+    const sidecarPath = path.join(tmpDir, "projects", "workspace-pin-groups.json");
+    mkdirSync(path.dirname(filePath), { recursive: true });
+    const workspaceBytes = "[]";
+    const corruptSidecarBytes = '{"groups":[';
+    writeFileSync(filePath, workspaceBytes);
+    writeFileSync(sidecarPath, corruptSidecarBytes);
+    const registry = new FileBackedWorkspaceRegistry(filePath, logger);
+
+    await expect(registry.initialize()).rejects.toThrow();
+    await expect(registry.createPinGroup("Must not write")).rejects.toThrow();
+    expect(readFileSync(filePath, "utf8")).toBe(workspaceBytes);
+    expect(readFileSync(sidecarPath, "utf8")).toBe(corruptSidecarBytes);
+  });
+
+  test("rolls back a durable prepared journal whose write acknowledgement is lost", async () => {
+    const filePath = path.join(tmpDir, "projects", "lost-prepare-ack-workspaces.json");
+    const sidecarPath = path.join(
+      tmpDir,
+      "projects",
+      "lost-prepare-ack-workspaces.pin-groups.json",
+    );
+    const transactionPath = path.join(
+      tmpDir,
+      "projects",
+      "lost-prepare-ack-workspaces.pin-groups.transaction.json",
+    );
+    const baseline = new FileBackedWorkspaceRegistry(filePath, logger, {
+      now: () => "2026-08-31T12:00:00.000Z",
+    });
+    await baseline.initialize();
+    const beforeWorkspaceBytes = readFileSync(filePath, "utf8");
+    const beforeSidecarBytes = readFileSync(sidecarPath, "utf8");
+    let losePreparedAcknowledgement = true;
+    const registry = new FileBackedWorkspaceRegistry(filePath, logger, {
+      pinGroupIdFactory: () => "pgrp_lost_ack",
+      now: () => "2026-08-31T13:00:00.000Z",
+      writePinGroupsTransaction: async (targetPath, transaction) => {
+        writeFileSync(targetPath, `${JSON.stringify(transaction)}\n`);
+        if (losePreparedAcknowledgement && transaction.phase === "prepared") {
+          losePreparedAcknowledgement = false;
+          throw new Error("prepared journal acknowledgement lost");
+        }
+      },
+    });
+    await registry.initialize();
+
+    await expect(registry.createPinGroup("Must roll back")).rejects.toThrow(
+      "prepared journal acknowledgement lost",
+    );
+    expect(existsSync(transactionPath)).toBe(false);
+    expect(readFileSync(filePath, "utf8")).toBe(beforeWorkspaceBytes);
+    expect(readFileSync(sidecarPath, "utf8")).toBe(beforeSidecarBytes);
+
+    await registry.upsert(
+      createPersistedWorkspaceRecord({
+        workspaceId: "ws-after-lost-prepare-ack",
+        projectId: "proj-1",
+        cwd: "/tmp/after-lost-prepare-ack",
+        kind: "directory",
+        displayName: "after-lost-prepare-ack",
+        createdAt: "2026-08-31T14:00:00.000Z",
+        updatedAt: "2026-08-31T14:00:00.000Z",
+      }),
+    );
+
+    const reloaded = new FileBackedWorkspaceRegistry(filePath, logger);
+    await reloaded.initialize();
+    expect(await reloaded.get("ws-after-lost-prepare-ack")).toMatchObject({
+      workspaceId: "ws-after-lost-prepare-ack",
+    });
+    expect((await reloaded.listPinGroups()).map((group) => group.id)).toEqual([
+      DEFAULT_WORKSPACE_PIN_GROUP_ID,
+    ]);
+  });
+
+  test("rolls back a prepared pin-group transaction after the sidecar write fails", async () => {
+    const filePath = path.join(tmpDir, "projects", "sidecar-failure-workspaces.json");
+    const sidecarPath = path.join(tmpDir, "projects", "sidecar-failure-workspaces.pin-groups.json");
+    const transactionPath = path.join(
+      tmpDir,
+      "projects",
+      "sidecar-failure-workspaces.pin-groups.transaction.json",
+    );
+    const baseline = new FileBackedWorkspaceRegistry(filePath, logger, {
+      now: () => "2026-08-31T12:00:00.000Z",
+    });
+    await baseline.initialize();
+    const sidecarWithFutureField = {
+      ...JSON.parse(readFileSync(sidecarPath, "utf8")),
+      futureCatalogVersion: 2,
+    };
+    const beforeWorkspaceBytes = " [\n]\n";
+    const beforeSidecarBytes = `${JSON.stringify(sidecarWithFutureField)}\n`;
+    writeFileSync(filePath, beforeWorkspaceBytes);
+    writeFileSync(sidecarPath, beforeSidecarBytes);
+
+    const failing = new FileBackedWorkspaceRegistry(filePath, logger, {
+      pinGroupIdFactory: () => "pgrp_rejected",
+      now: () => "2026-08-31T13:00:00.000Z",
+      writePinGroupsFile: async () => {
+        throw new Error("sidecar write failed");
+      },
+      writeRawFile: async () => {
+        throw new Error("simulated process interruption before rollback");
+      },
+    });
+    await failing.initialize();
+    await expect(failing.createPinGroup("Rejected")).rejects.toThrow(
+      "Workspace pin-group storage outcome is uncertain",
+    );
+    expect(JSON.parse(readFileSync(transactionPath, "utf8"))).toMatchObject({
+      phase: "prepared",
+    });
+
+    const reloaded = new FileBackedWorkspaceRegistry(filePath, logger);
+    await reloaded.initialize();
+    expect((await reloaded.listPinGroups()).map((group) => group.id)).toEqual([
+      DEFAULT_WORKSPACE_PIN_GROUP_ID,
+    ]);
+    expect(readFileSync(filePath, "utf8")).toBe(beforeWorkspaceBytes);
+    expect(readFileSync(sidecarPath, "utf8")).toBe(beforeSidecarBytes);
+  });
+
+  test("rolls back sidecar membership after the workspace-array write fails", async () => {
+    const filePath = path.join(tmpDir, "projects", "workspace-failure-workspaces.json");
+    const sidecarPath = path.join(
+      tmpDir,
+      "projects",
+      "workspace-failure-workspaces.pin-groups.json",
+    );
+    const transactionPath = path.join(
+      tmpDir,
+      "projects",
+      "workspace-failure-workspaces.pin-groups.transaction.json",
+    );
+    const baseline = new FileBackedWorkspaceRegistry(filePath, logger, {
+      pinGroupIdFactory: () => "pgrp_focus",
+      now: () => "2026-08-31T12:00:00.000Z",
+    });
+    await baseline.initialize();
+    await baseline.upsert(
+      createPersistedWorkspaceRecord({
+        workspaceId: "ws-rejected-membership",
+        projectId: "proj-1",
+        cwd: "/tmp/rejected-membership",
+        kind: "directory",
+        displayName: "rejected-membership",
+        createdAt: "2026-08-31T12:00:00.000Z",
+        updatedAt: "2026-08-31T12:00:00.000Z",
+      }),
+    );
+    const focus = await baseline.createPinGroup("Focus");
+    const workspaceWithFutureField = JSON.parse(readFileSync(filePath, "utf8"));
+    workspaceWithFutureField[0].futureWorkspaceVersion = 2;
+    const sidecarWithFutureField = {
+      ...JSON.parse(readFileSync(sidecarPath, "utf8")),
+      futureCatalogVersion: 2,
+    };
+    const beforeWorkspaceBytes = `${JSON.stringify(workspaceWithFutureField)}\n`;
+    const beforeSidecarBytes = ` ${JSON.stringify(sidecarWithFutureField)}\n`;
+    writeFileSync(filePath, beforeWorkspaceBytes);
+    writeFileSync(sidecarPath, beforeSidecarBytes);
+
+    const failing = new FileBackedWorkspaceRegistry(filePath, logger, {
+      writeRecords: async () => {
+        throw new Error("workspace array write failed");
+      },
+      writeRawFile: async () => {
+        throw new Error("simulated process interruption before rollback");
+      },
+    });
+    await failing.initialize();
+    await expect(
+      failing.setWorkspacePinGroup({
+        workspaceId: "ws-rejected-membership",
+        groupId: focus.id,
+        updatedAt: "2026-08-31T13:00:00.000Z",
+      }),
+    ).rejects.toThrow("Workspace pin-group storage outcome is uncertain");
+    expect(JSON.parse(readFileSync(transactionPath, "utf8"))).toMatchObject({
+      phase: "prepared",
+    });
+
+    const reloaded = new FileBackedWorkspaceRegistry(filePath, logger);
+    await reloaded.initialize();
+    expect(await reloaded.get("ws-rejected-membership")).toMatchObject({
+      pinGroupId: null,
+      pinGroupAssignedAt: null,
+      pinnedAt: null,
+    });
+    expect(readFileSync(filePath, "utf8")).toBe(beforeWorkspaceBytes);
+    expect(readFileSync(sidecarPath, "utf8")).toBe(beforeSidecarBytes);
+  });
+
+  test("keeps committed pin-group after-images and only cleans up their journal", async () => {
+    const filePath = path.join(tmpDir, "projects", "committed-workspaces.json");
+    const sidecarPath = path.join(tmpDir, "projects", "committed-workspaces.pin-groups.json");
+    const transactionPath = path.join(
+      tmpDir,
+      "projects",
+      "committed-workspaces.pin-groups.transaction.json",
+    );
+    const baseline = new FileBackedWorkspaceRegistry(filePath, logger, {
+      pinGroupIdFactory: () => "pgrp_committed",
+      now: () => "2026-08-31T12:00:00.000Z",
+    });
+    await baseline.initialize();
+    await baseline.createPinGroup("Committed");
+    const afterWorkspaceBytes = readFileSync(filePath, "utf8");
+    const afterSidecarBytes = readFileSync(sidecarPath, "utf8");
+    writeFileSync(
+      transactionPath,
+      JSON.stringify({
+        phase: "committed",
+        beforeWorkspaces: { exists: true, contents: "[]" },
+        afterWorkspaces: JSON.parse(afterWorkspaceBytes),
+        beforePinGroups: { exists: false },
+        afterPinGroups: JSON.parse(afterSidecarBytes),
+      }),
+    );
+
+    const reloaded = new FileBackedWorkspaceRegistry(filePath, logger);
+    await reloaded.initialize();
+
+    expect((await reloaded.listPinGroups()).map((group) => group.id)).toEqual([
+      DEFAULT_WORKSPACE_PIN_GROUP_ID,
+      "pgrp_committed",
+    ]);
+    expect(readFileSync(filePath, "utf8")).toBe(afterWorkspaceBytes);
+    expect(readFileSync(sidecarPath, "utf8")).toBe(afterSidecarBytes);
+    expect(existsSync(transactionPath)).toBe(false);
   });
 
   test("creates, renames, lists, and persists pin groups with trimmed names", async () => {
@@ -675,7 +1063,18 @@ describe("workspace registries", () => {
         groupId: focus.id,
         updatedAt: "2026-08-31T13:01:00.000Z",
       }),
-    ).toMatchObject({ pinGroupId: focus.id, pinnedAt: null });
+    ).toMatchObject({
+      pinGroupId: focus.id,
+      pinGroupAssignedAt: "2026-08-31T13:01:00.000Z",
+      pinnedAt: null,
+    });
+    const reloaded = new FileBackedWorkspaceRegistry(filePath, logger);
+    await reloaded.initialize();
+    expect(await reloaded.get("ws-focus")).toMatchObject({
+      pinGroupId: focus.id,
+      pinGroupAssignedAt: "2026-08-31T13:01:00.000Z",
+      pinnedAt: null,
+    });
 
     expect(await registry.deletePinGroup(focus.id)).toEqual(["ws-focus"]);
     expect(await registry.get("ws-focus")).toMatchObject({

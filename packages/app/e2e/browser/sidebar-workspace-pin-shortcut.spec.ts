@@ -26,6 +26,14 @@ function pinnedWorkspaceRow(page: Page, workspaceId: string) {
   return pinnedSection(page).getByTestId(`sidebar-workspace-row-${getServerId()}:${workspaceId}`);
 }
 
+async function fetchPinGroupId(workspace: SeededWorkspace): Promise<string | null> {
+  const descriptor = (await workspace.client.fetchWorkspaces()).entries.find(
+    (entry) => entry.id === workspace.workspaceId,
+  );
+  if (!descriptor) throw new Error(`Workspace ${workspace.workspaceId} is missing from daemon`);
+  return descriptor.pinGroupId ?? null;
+}
+
 // Opens the workspace so it becomes the active route selection, which is what the shortcut acts on.
 async function openWorkspace(page: Page, workspaceId: string) {
   const row = workspaceRow(page, workspaceId);
@@ -280,6 +288,10 @@ test.describe("Pin workspace shortcut", () => {
       await page.keyboard.press(PIN_SHORTCUT);
 
       await expect(pinnedSection(page)).toBeVisible({ timeout: 10_000 });
+      await expect(pinnedWorkspaceRow(page, workspace.workspaceId)).toBeVisible({
+        timeout: 10_000,
+      });
+      await expect(fetchPinGroupId(workspace)).resolves.toBe("default");
       expect(gate.sentCount()).toBe(2);
     } finally {
       await workspace.cleanup();

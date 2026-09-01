@@ -21,6 +21,7 @@ import {
   type ProjectPlacementPayload,
   type WorkspaceSetupSnapshot,
   type WorkspaceDescriptorPayload,
+  type WorkspacePinGroup,
 } from "./messages.js";
 import type {
   TerminalManager,
@@ -605,7 +606,12 @@ interface WorkspaceUpdateOptions {
   dedupeGitState?: boolean;
   removedProjectId?: string;
   optimisticStatus?: WorkspaceDescriptorPayload["status"];
+  pinGroups?: WorkspacePinGroup[];
 }
+
+// A catalog-only invalidation still uses the backward-compatible workspace update envelope.
+// Old clients treat this unknown removal as a no-op; capable clients consume `pinGroups`.
+const WORKSPACE_PIN_GROUP_CATALOG_UPDATE_ID = "__workspace_pin_groups__";
 
 function resolveDirectorySync(service: DirectorySyncService | undefined): DirectorySyncService {
   return service ?? new DirectorySyncService();
@@ -1512,6 +1518,12 @@ export class Session {
       if (this.isCleanedUp) {
         return;
       }
+      if (mutation.kind === "pin_groups") {
+        await this.emitWorkspaceUpdatesForWorkspaceIds([WORKSPACE_PIN_GROUP_CATALOG_UPDATE_ID], {
+          pinGroups: mutation.pinGroups,
+        });
+        return;
+      }
       if (
         mutation.kind === "archive" ||
         mutation.kind === "remove" ||
@@ -1530,13 +1542,19 @@ export class Session {
       );
     } catch (error) {
       this.sessionLogger.warn(
-        { err: error, workspaceId: mutation.workspaceId, mutationKind: mutation.kind },
+        {
+          err: error,
+          workspaceId: mutation.kind === "pin_groups" ? undefined : mutation.workspaceId,
+          mutationKind: mutation.kind,
+        },
         "Failed to apply workspace mutation to session",
       );
     }
   }
 
-  private async syncWorkspaceMutationObserver(mutation: WorkspaceMutation): Promise<void> {
+  private async syncWorkspaceMutationObserver(
+    mutation: Exclude<WorkspaceMutation, { kind: "pin_groups" }>,
+  ): Promise<void> {
     const subscription = this.workspaceUpdatesSubscription;
     if (!mutation.workspace || !subscription) {
       return;
@@ -4979,6 +4997,7 @@ export class Session {
       title: workspace.title,
       pinnedAt: workspace.pinnedAt,
       pinGroupId: workspace.pinGroupId,
+      pinGroupAssignedAt: workspace.pinGroupAssignedAt,
       ...(workspace.labels && workspace.labels.length > 0 ? { labels: workspace.labels } : {}),
       archivingAt: null,
       status: "done",
@@ -5072,6 +5091,7 @@ export class Session {
       title: result.workspace.title,
       pinnedAt: result.workspace.pinnedAt,
       pinGroupId: result.workspace.pinGroupId,
+      pinGroupAssignedAt: result.workspace.pinGroupAssignedAt,
       ...(result.workspace.labels && result.workspace.labels.length > 0
         ? { labels: result.workspace.labels }
         : {}),
@@ -5437,7 +5457,7 @@ export class Session {
       }
       this.workspaceGitObserver.recordDescriptorState(workspaceId, nextWorkspace);
       if (!nextWorkspace) {
-        if (this.shouldSkipWorkspaceRemoval(lastEmitted, options?.removedProjectId)) {
+        if (this.shouldSkipWorkspaceRemovalUpdate(lastEmitted, options)) {
           continue;
         }
         if (this.workspaceUpdatesSubscription !== subscription) {
@@ -5451,7 +5471,7 @@ export class Session {
         this.bufferOrEmitWorkspaceUpdate(
           subscription,
           this.directorySync.sequenceWorkspaceUpdate(
-            removePayload,
+            this.attachPinGroupCatalog(removePayload, options?.pinGroups),
             workspace ?? null,
             workspaceId,
             subscription.syncEnabled === true,
@@ -5461,22 +5481,48 @@ export class Session {
       }
 
       const nextPayload: WorkspaceUpdatePayload = this.directorySync.sequenceWorkspaceUpdate(
-        { kind: "upsert", workspace: nextWorkspace },
+        this.attachPinGroupCatalog(
+          { kind: "upsert", workspace: nextWorkspace },
+          options?.pinGroups,
+        ),
         workspace ?? null,
         workspaceId,
         subscription.syncEnabled === true,
       );
 
-      if (
-        lastEmitted &&
-        lastEmitted.kind === "upsert" &&
-        equal(lastEmitted.workspace, nextWorkspace)
-      ) {
+      if (this.shouldSkipWorkspaceUpsertUpdate(lastEmitted, nextWorkspace, options)) {
         continue;
       }
 
       this.bufferOrEmitWorkspaceUpdate(subscription, nextPayload);
     }
+  }
+
+  private attachPinGroupCatalog<TPayload extends WorkspaceUpdatePayload>(
+    payload: TPayload,
+    pinGroups: WorkspacePinGroup[] | undefined,
+  ): TPayload {
+    if (pinGroups === undefined) return payload;
+    return { ...payload, pinGroups };
+  }
+
+  private shouldSkipWorkspaceRemovalUpdate(
+    lastEmitted: WorkspaceUpdatePayload | undefined,
+    options: WorkspaceUpdateOptions | undefined,
+  ): boolean {
+    if (options?.pinGroups !== undefined) return false;
+    return this.shouldSkipWorkspaceRemoval(lastEmitted, options?.removedProjectId);
+  }
+
+  private shouldSkipWorkspaceUpsertUpdate(
+    lastEmitted: WorkspaceUpdatePayload | undefined,
+    nextWorkspace: WorkspaceDescriptorPayload,
+    options: WorkspaceUpdateOptions | undefined,
+  ): boolean {
+    if (options?.pinGroups !== undefined || !lastEmitted || lastEmitted.kind !== "upsert") {
+      return false;
+    }
+    return equal(lastEmitted.workspace, nextWorkspace);
   }
 
   private applyOptimisticWorkspaceStatus(

@@ -141,9 +141,10 @@ traffic. Workspace assignments stay on the workspace directory sequence.
 
 Workspace pin groups are daemon-shared catalog data fetched and changed through
 `workspace.pin_group.*` RPCs. Membership remains part of each workspace descriptor, so membership
-changes and group deletion use the workspace directory sequence. Custom group IDs are scoped to
-their daemon; the app stores the owning host with the active custom group and only offers that group
-for workspaces on that host. The `default` group spans capable hosts by its reserved ID.
+changes and group deletion use the workspace directory sequence. Catalog changes also attach the
+latest catalog to that existing update channel, which invalidates other devices after create,
+rename, or delete. Every active selection is a `(serverId, groupId)` pair, including `default`, so
+the pinned section never combines workspaces from different daemons.
 
 ### `packages/cli` — Command-line client
 
@@ -417,7 +418,9 @@ Providers that can accept native tool definitions should set `supportsNativePase
 $PASEO_HOME/
 ├── agents/{cwd-with-dashes}/{agent-id}.json   # Agent record
 ├── projects/projects.json                      # Project registry
-├── projects/workspaces.json                    # Workspace registry and pin-group catalog
+├── projects/workspaces.json                    # Downgrade-readable workspace registry array
+├── projects/workspace-pin-groups.json           # Pin-group catalog and memberships
+├── projects/workspace-pin-groups.transaction.json # Recoverable compound-write journal
 ├── projects/icons/                             # Custom project icon images
 ├── schedules/                                  # Scheduled-agent definitions and runs
 ├── config.json                                 # Daemon config (mutable)

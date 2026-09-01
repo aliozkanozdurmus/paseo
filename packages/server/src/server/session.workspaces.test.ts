@@ -178,6 +178,7 @@ interface SessionTestAccess {
   emitWorkspaceUpdateForCwd(...args: unknown[]): Promise<unknown>;
   emitWorkspaceUpdatesForWorkspaceIds(...args: unknown[]): Promise<unknown>;
   emitWorkspaceUpdatesForExternalWorkspaceIds(workspaceIds: Iterable<string>): Promise<void>;
+  flushBootstrappedWorkspaceUpdates(options?: unknown): void;
   updateClientCapabilities(capabilities: Record<string, unknown> | null): void;
   emit(message: unknown): void;
   onMessage(message: unknown): void;
@@ -7468,6 +7469,170 @@ test("workspace mutations outside a filtered subscription neither watch nor emit
   expect(filterByType(emitted, "workspace_update")).toEqual([]);
 });
 
+test("pin-group catalog mutations survive workspace subscription bootstrap", async () => {
+  const emitted: SessionOutboundMessage[] = [];
+  let mutationListener: ((mutation: WorkspaceMutation) => void | Promise<void>) | null = null;
+  const project = createPersistedProjectRecord({
+    projectId: "proj-pin-catalog-bootstrap",
+    rootPath: REPO_CWD,
+    kind: "git",
+    displayName: "repo",
+    createdAt: "2026-08-31T12:00:00.000Z",
+    updatedAt: "2026-08-31T12:00:00.000Z",
+  });
+  const workspace = createPersistedWorkspaceRecord({
+    workspaceId: "ws-pin-catalog-bootstrap",
+    projectId: project.projectId,
+    cwd: REPO_CWD,
+    kind: "local_checkout",
+    displayName: "main",
+    createdAt: "2026-08-31T12:00:00.000Z",
+    updatedAt: "2026-08-31T12:00:00.000Z",
+  });
+  const descriptor = {
+    id: workspace.workspaceId,
+    projectId: project.projectId,
+    projectDisplayName: project.displayName,
+    projectRootPath: project.rootPath,
+    workspaceDirectory: workspace.cwd,
+    projectKind: project.kind,
+    workspaceKind: workspace.kind,
+    name: workspace.displayName,
+    status: "done",
+    activityAt: null,
+    diffStat: null,
+  } as WorkspaceDescriptorPayload;
+  const session = createSessionForWorkspaceTests({
+    onMessage: (message) => emitted.push(message),
+    projectRegistry: {
+      initialize: async () => {},
+      existsOnDisk: async () => true,
+      list: async () => [project],
+      get: async (projectId: string) => (projectId === project.projectId ? project : null),
+      getOrCreateActiveByRoot: async () => project,
+      upsert: async () => {},
+      archive: async () => {},
+      remove: async () => {},
+    },
+    workspaceRegistry: {
+      initialize: async () => {},
+      existsOnDisk: async () => true,
+      list: async () => [workspace],
+      get: async (workspaceId: string) =>
+        workspaceId === workspace.workspaceId ? workspace : null,
+      update: async () => null,
+      upsert: async () => {},
+      archive: async () => {},
+      remove: async () => {},
+      subscribeToMutations: (listener) => {
+        mutationListener = listener;
+        return () => {
+          mutationListener = null;
+        };
+      },
+    },
+  });
+  const listingStarted = deferred<void>();
+  const listing = deferred<ListFetchResult>();
+  session.listFetchWorkspacesEntries = async () => {
+    listingStarted.resolve();
+    return listing.promise;
+  };
+  session.buildWorkspaceDescriptorMap = async () => new Map([[descriptor.id, descriptor]]);
+  const pinGroups = [
+    {
+      id: DEFAULT_WORKSPACE_PIN_GROUP_ID,
+      name: "Pinned",
+      createdAt: "2026-08-31T12:00:00.000Z",
+    },
+    {
+      id: "pgrp-focus",
+      name: "Focus",
+      createdAt: "2026-08-31T12:01:00.000Z",
+    },
+  ];
+
+  const bootstrap = session.handleMessage({
+    type: "fetch_workspaces_request",
+    requestId: "req-pin-catalog-bootstrap",
+    subscribe: { subscriptionId: "sub-pin-catalog" },
+  });
+  await listingStarted.promise;
+  const catalogMutation = mutationListener?.({ kind: "pin_groups", pinGroups });
+  expect(catalogMutation).toBeDefined();
+  await catalogMutation;
+  expect(filterByType(emitted, "workspace_update")).toEqual([]);
+  listing.resolve({
+    entries: [descriptor],
+    emptyProjects: [],
+    pageInfo: { nextCursor: null, prevCursor: null, hasMore: false },
+  });
+  await bootstrap;
+
+  expect(
+    emitted.filter(
+      (message) =>
+        message.type === "fetch_workspaces_response" || message.type === "workspace_update",
+    ),
+  ).toEqual([
+    expect.objectContaining({ type: "fetch_workspaces_response" }),
+    {
+      type: "workspace_update",
+      payload: {
+        kind: "remove",
+        id: "__workspace_pin_groups__",
+        pinGroups,
+      },
+    },
+  ]);
+});
+
+test("pin-group catalog mutations broadcast when the registry has no workspaces", async () => {
+  const emitted: SessionOutboundMessage[] = [];
+  let mutationListener: ((mutation: WorkspaceMutation) => void | Promise<void>) | null = null;
+  const session = createSessionForWorkspaceTests({
+    onMessage: (message) => emitted.push(message),
+    workspaceRegistry: {
+      initialize: async () => {},
+      existsOnDisk: async () => true,
+      list: async () => [],
+      get: async () => null,
+      update: async () => null,
+      upsert: async () => {},
+      archive: async () => {},
+      remove: async () => {},
+      subscribeToMutations: (listener) => {
+        mutationListener = listener;
+        return () => {
+          mutationListener = null;
+        };
+      },
+    },
+  });
+  session.workspaceUpdatesSubscription = {
+    subscriptionId: "sub-pin-catalog-empty",
+    filter: undefined,
+    isBootstrapping: false,
+    pendingUpdatesByWorkspaceId: new Map(),
+    lastEmittedByWorkspaceId: new Map(),
+  };
+  session.buildWorkspaceDescriptorMap = async () => new Map();
+  const pinGroups = [
+    {
+      id: DEFAULT_WORKSPACE_PIN_GROUP_ID,
+      name: "Pinned",
+      createdAt: "2026-08-31T12:00:00.000Z",
+    },
+  ];
+
+  await mutationListener?.({ kind: "pin_groups", pinGroups });
+
+  expect(findByType(emitted, "workspace_update")?.payload).toMatchObject({
+    kind: "remove",
+    pinGroups,
+  });
+});
+
 test("project removal mutation broadcasts the final delta to another subscribed session", async () => {
   const emitted: SessionOutboundMessage[] = [];
   const project = createPersistedProjectRecord({
@@ -8209,6 +8374,7 @@ test("workspace.pin.set.request stores the pin timestamp and emits an updated de
     const updated = {
       ...existing,
       pinGroupId: input.groupId,
+      pinGroupAssignedAt: input.groupId ? input.updatedAt : null,
       pinnedAt: input.groupId === DEFAULT_WORKSPACE_PIN_GROUP_ID ? input.updatedAt : null,
       updatedAt: input.updatedAt,
     };
@@ -8245,6 +8411,7 @@ test("workspace.pin.set.request stores the pin timestamp and emits an updated de
       id: "ws-1",
       pinnedAt: response?.payload.pinnedAt,
       pinGroupId: DEFAULT_WORKSPACE_PIN_GROUP_ID,
+      pinGroupAssignedAt: response?.payload.pinnedAt,
     },
   });
 });
@@ -8332,7 +8499,7 @@ test("workspace pin group RPCs manage the daemon-shared catalog and membership",
   expect(session.emitWorkspaceUpdatesForWorkspaceIds).toHaveBeenCalledWith(["ws-1"]);
 });
 
-test("workspace pin group RPC permissions allow reads and reject mutations without manage", async () => {
+test("workspace pin group RPC permissions allow catalog reads", async () => {
   const emitted: SessionOutboundMessage[] = [];
   const session = asTestSession(
     createSessionForWorkspaceTests({
@@ -8340,32 +8507,75 @@ test("workspace pin group RPC permissions allow reads and reject mutations witho
       onMessage: (message) => emitted.push(message),
     }),
   );
-  const createPinGroup = vi.fn(async () => ({
-    id: "pgrp-focus",
-    name: "Focus",
-    createdAt: "2026-08-31T12:00:00.000Z",
-  }));
   session.workspaceRegistry.listPinGroups = async () => [];
-  session.workspaceRegistry.createPinGroup = createPinGroup;
 
   await session.handleMessage({
     type: "workspace.pin_group.list.request",
     requestId: "req-list-read-only",
   });
-  await session.handleMessage({
-    type: "workspace.pin_group.create.request",
-    name: "Focus",
-    requestId: "req-create-read-only",
-  });
 
   expect(findByType(emitted, "workspace.pin_group.list.response")?.payload.groups).toEqual([]);
+});
+
+test.each([
+  [
+    "create",
+    {
+      type: "workspace.pin_group.create.request",
+      name: "Focus",
+      requestId: "req-create-read-only",
+    } as const,
+    "createPinGroup" as const,
+  ],
+  [
+    "rename",
+    {
+      type: "workspace.pin_group.rename.request",
+      groupId: "pgrp-focus",
+      name: "This week",
+      requestId: "req-rename-read-only",
+    } as const,
+    "renamePinGroup" as const,
+  ],
+  [
+    "delete",
+    {
+      type: "workspace.pin_group.delete.request",
+      groupId: "pgrp-focus",
+      requestId: "req-delete-read-only",
+    } as const,
+    "deletePinGroup" as const,
+  ],
+  [
+    "set membership",
+    {
+      type: "workspace.pin_group.set_membership.request",
+      workspaceId: "ws-1",
+      groupId: "pgrp-focus",
+      requestId: "req-membership-read-only",
+    } as const,
+    "setWorkspacePinGroup" as const,
+  ],
+])("rejects workspace pin group %s without workspace.manage", async (_label, message, method) => {
+  const emitted: SessionOutboundMessage[] = [];
+  const session = asTestSession(
+    createSessionForWorkspaceTests({
+      permissions: ["workspace.read"],
+      onMessage: (outbound) => emitted.push(outbound),
+    }),
+  );
+  const registryMethod = vi.fn();
+  session.workspaceRegistry[method] = registryMethod;
+
+  await session.handleMessage(message);
+
   expect(findByType(emitted, "rpc_error")?.payload).toEqual({
-    requestId: "req-create-read-only",
-    requestType: "workspace.pin_group.create.request",
-    error: "Session is not authorized for workspace.pin_group.create.request",
+    requestId: message.requestId,
+    requestType: message.type,
+    error: `Session is not authorized for ${message.type}`,
     code: "access_denied",
   });
-  expect(createPinGroup).not.toHaveBeenCalled();
+  expect(registryMethod).not.toHaveBeenCalled();
 });
 
 test("workspace.title.set.request with whitespace-only title clears the title", async () => {

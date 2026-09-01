@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { ChevronDown } from "lucide-react-native";
 import { Text } from "react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
+import { useQueryClient } from "@tanstack/react-query";
 import type { WorkspacePinGroup } from "@getpaseo/protocol/messages";
 import {
   DropdownMenu,
@@ -21,12 +22,14 @@ import {
   type MenuPageDefinition,
   type MenuTriggerState,
 } from "@/components/ui/menu";
-import { getHostRuntimeStore } from "@/runtime/host-runtime";
+import { useHostRuntimeClient } from "@/runtime/host-runtime";
+import { useHostFeatureAvailability } from "@/runtime/host-features";
 import { DEFAULT_WORKSPACE_PIN_GROUP_ID, useSidebarViewStore } from "@/stores/sidebar-view-store";
 import type { Theme } from "@/styles/theme";
 import { confirmDialog } from "@/utils/confirm-dialog";
 import { useFetchQuery } from "@/data/query";
 import { useToast } from "@/contexts/toast-context";
+import { applyWorkspacePinGroupCatalog, workspacePinGroupsQueryKey } from "./catalog";
 import { buildWorkspacePinGroupMenuModel } from "./menu-model";
 
 const SWITCH_PAGE_ID = "workspacePinGroupsSwitch";
@@ -37,28 +40,85 @@ const ThemedChevronDown = withUnistyles(ChevronDown);
 const mutedMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
 const EMPTY_PIN_GROUPS: readonly WorkspacePinGroup[] = [];
 
-function pinGroupsQueryKey(serverId: string): readonly ["workspacePinGroups", string] {
-  return ["workspacePinGroups", serverId];
-}
-
-function getPinGroupClient(serverId: string) {
-  const client = getHostRuntimeStore().getClient(serverId);
-  if (!client) throw new Error("Host is disconnected");
-  return client;
-}
-
 function pinGroupErrorMessage(cause: unknown, fallback: string): string {
   return cause instanceof Error && cause.message ? cause.message : fallback;
 }
 
 export function WorkspacePinGroupMenu({ serverId }: { serverId: string }): ReactElement {
+  const client = useHostRuntimeClient(serverId);
+  const queryClient = useQueryClient();
+  const pinGroupAvailability = useHostFeatureAvailability(serverId, "workspacePinGroups");
+
+  useEffect(() => {
+    if (!client) return;
+    return client.on("workspace_update", (message) => {
+      if (message.type !== "workspace_update") return;
+      const pinGroups = message.payload.pinGroups;
+      if (!pinGroups) return;
+      applyWorkspacePinGroupCatalog({ queryClient, serverId, pinGroups });
+    });
+  }, [client, queryClient, serverId]);
+
+  if (pinGroupAvailability !== true || !client) {
+    const unavailableReason: false | null = client && pinGroupAvailability === false ? false : null;
+    return <UnavailableWorkspacePinGroupMenu availability={unavailableReason} />;
+  }
+  return <SupportedWorkspacePinGroupMenu client={client} serverId={serverId} />;
+}
+
+function UnavailableWorkspacePinGroupMenu({
+  availability,
+}: {
+  availability: false | null;
+}): ReactElement {
+  const { t } = useTranslation();
+  const activeName = t("sidebar.pinned.title");
+  return (
+    <DropdownMenu compactMode="sheet">
+      <DropdownMenuTrigger
+        accessibilityLabel={`${t("sidebar.pinned.groups.menuTitle")}: ${activeName}`}
+        style={pinGroupTriggerStyle}
+        testID="sidebar-pin-groups-menu-trigger"
+      >
+        <Text style={styles.triggerLabel} numberOfLines={1}>
+          {activeName}
+        </Text>
+        <ThemedChevronDown size={12} uniProps={mutedMapping} />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent
+        align="start"
+        width={220}
+        sheetTitle={t("sidebar.pinned.groups.menuTitle")}
+        testID="sidebar-pin-groups-menu"
+      >
+        <DropdownMenuHint
+          testID={availability === false ? "sidebar-pin-groups-update-host" : undefined}
+        >
+          {availability === false
+            ? t("sidebar.pinned.groups.updateHost")
+            : t("sidebar.workspace.toasts.hostDisconnected")}
+        </DropdownMenuHint>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+function SupportedWorkspacePinGroupMenu({
+  client,
+  serverId,
+}: {
+  client: NonNullable<ReturnType<typeof useHostRuntimeClient>>;
+  serverId: string;
+}): ReactElement {
   const { t } = useTranslation();
   const toast = useToast();
-  const activeGroupId = useSidebarViewStore((state) => state.activePinGroupId);
-  const setActiveGroupId = useSidebarViewStore((state) => state.setActivePinGroupId);
+  const activePinGroup = useSidebarViewStore((state) => state.activePinGroup);
+  const setActivePinGroup = useSidebarViewStore((state) => state.setActivePinGroup);
+  const activeGroupId =
+    activePinGroup?.serverId === serverId ? activePinGroup.groupId : DEFAULT_WORKSPACE_PIN_GROUP_ID;
   const groupsQuery = useFetchQuery<WorkspacePinGroup[]>({
-    queryKey: pinGroupsQueryKey(serverId),
-    queryFn: () => getPinGroupClient(serverId).listWorkspacePinGroups(),
+    queryKey: workspacePinGroupsQueryKey(serverId),
+    queryFn: () => client.listWorkspacePinGroups(),
     dataShape: "list",
     staleTimeMs: 30_000,
   });
@@ -70,32 +130,35 @@ export function WorkspacePinGroupMenu({ serverId }: { serverId: string }): React
   );
 
   useEffect(() => {
-    if (!groupsQuery.data || model.activeGroup) return;
-    setActiveGroupId(DEFAULT_WORKSPACE_PIN_GROUP_ID, null);
-  }, [groupsQuery.data, model.activeGroup, setActiveGroupId]);
+    if (!groupsQuery.data) return;
+    useSidebarViewStore.getState().reconcilePinGroups(
+      serverId,
+      groupsQuery.data.map((group) => group.id),
+    );
+  }, [groupsQuery.data, serverId]);
 
   const selectGroup = useCallback(
     (groupId: string) => {
-      setActiveGroupId(groupId, groupId === DEFAULT_WORKSPACE_PIN_GROUP_ID ? null : serverId);
+      setActivePinGroup({ serverId, groupId });
     },
-    [serverId, setActiveGroupId],
+    [serverId, setActivePinGroup],
   );
 
   const createGroup = useCallback(
     async (name: string) => {
-      const group = await getPinGroupClient(serverId).createWorkspacePinGroup(name);
+      const group = await client.createWorkspacePinGroup(name);
       await refetchGroups();
-      setActiveGroupId(group.id, serverId);
+      setActivePinGroup({ serverId, groupId: group.id });
     },
-    [refetchGroups, serverId, setActiveGroupId],
+    [client, refetchGroups, serverId, setActivePinGroup],
   );
   const renameGroup = useCallback(
     async (name: string) => {
       if (!model.activeGroup) return;
-      await getPinGroupClient(serverId).renameWorkspacePinGroup(model.activeGroup.id, name);
+      await client.renameWorkspacePinGroup(model.activeGroup.id, name);
       await refetchGroups();
     },
-    [model.activeGroup, refetchGroups, serverId],
+    [client, model.activeGroup, refetchGroups],
   );
   const deleteGroup = useCallback(async () => {
     const activeGroup = model.activeGroup;
@@ -109,13 +172,13 @@ export function WorkspacePinGroupMenu({ serverId }: { serverId: string }): React
     });
     if (!confirmed) return;
     try {
-      await getPinGroupClient(serverId).deleteWorkspacePinGroup(activeGroup.id);
-      setActiveGroupId(DEFAULT_WORKSPACE_PIN_GROUP_ID, null);
+      await client.deleteWorkspacePinGroup(activeGroup.id);
+      setActivePinGroup({ serverId, groupId: DEFAULT_WORKSPACE_PIN_GROUP_ID });
       await refetchGroups();
     } catch (cause) {
       toast.error(pinGroupErrorMessage(cause, t("sidebar.pinned.groups.actionError")));
     }
-  }, [model.activeGroup, refetchGroups, serverId, setActiveGroupId, t, toast]);
+  }, [client, model.activeGroup, refetchGroups, serverId, setActivePinGroup, t, toast]);
 
   const switchPage = useMemo(
     () => (

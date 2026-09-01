@@ -43,6 +43,7 @@ export interface SidebarWorkspaceEntry extends SidebarStatusWorkspacePlacement {
   title: string | null;
   pinnedAt?: string | null;
   pinGroupId?: string | null;
+  pinGroupAssignedAt?: string | null;
   labels?: string[];
   // Checkout branch (null when not a git checkout or detached HEAD).
   currentBranch: string | null;
@@ -169,6 +170,7 @@ export function createSidebarWorkspaceEntry(input: {
     title: input.workspace.title ?? null,
     pinnedAt: input.workspace.pinnedAt,
     pinGroupId: input.workspace.pinGroupId,
+    pinGroupAssignedAt: input.workspace.pinGroupAssignedAt,
     labels: input.workspace.labels ?? EMPTY_WORKSPACE_LABELS,
     currentBranch: normalizeCurrentBranch(input.workspace.gitRuntime?.currentBranch),
     statusBucket: effectiveStatus.status,

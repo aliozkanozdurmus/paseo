@@ -8,12 +8,12 @@ import type {
 import { applyStoredOrdering } from "@/hooks/sidebar-workspaces-view-model";
 import { useHostFeatureMap } from "@/runtime/host-features";
 import { useSessionStore } from "@/stores/session-store";
-import { DEFAULT_WORKSPACE_PIN_GROUP_ID, useSidebarViewStore } from "@/stores/sidebar-view-store";
+import { type WorkspacePinGroupSelection, useSidebarViewStore } from "@/stores/sidebar-view-store";
 
 export interface PinnedSidebarKeys {
   pinnedWorkspaceKeys: string[];
-  // workspaceKey -> pinnedAt ISO string, used to order by recency.
-  pinnedAtByKey: Record<string, string>;
+  // workspaceKey -> group-assignment ISO string, used to order by recency.
+  pinAssignedAtByKey: Record<string, string>;
 }
 
 export interface PinnedSidebarGroups {
@@ -37,38 +37,35 @@ function projectWithoutPinnedWorkspaces(
 }
 
 interface WorkspacePinFields {
-  pinnedAt?: string | null;
   pinGroupId?: string | null;
+  pinGroupAssignedAt?: string | null;
 }
 
 export function buildPinnedSidebarKeys(input: {
   projects: SidebarProjectEntry[];
   workspaceMaps: ReadonlyMap<string, ReadonlyMap<string, WorkspacePinFields>>;
   supportsPinGroupsByServerId: ReadonlyMap<string, boolean>;
-  activePinGroupId: string;
-  activePinGroupServerId: string | null;
+  activePinGroup: WorkspacePinGroupSelection | null;
 }): PinnedSidebarKeys {
   const pinnedWorkspaceKeys: string[] = [];
-  const pinnedAtByKey: Record<string, string> = {};
+  const pinAssignedAtByKey: Record<string, string> = {};
 
   for (const project of input.projects) {
     for (const placement of project.workspaces) {
       const workspace = input.workspaceMaps.get(placement.serverId)?.get(placement.workspaceId);
-      const supportsPinGroups = input.supportsPinGroupsByServerId.get(placement.serverId) === true;
-      const isDefaultGroup = input.activePinGroupId === DEFAULT_WORKSPACE_PIN_GROUP_ID;
-      const isPinned = supportsPinGroups
-        ? (isDefaultGroup || placement.serverId === input.activePinGroupServerId) &&
-          workspace?.pinGroupId === input.activePinGroupId
-        : isDefaultGroup && workspace?.pinnedAt != null;
+      const isPinned =
+        input.supportsPinGroupsByServerId.get(placement.serverId) === true &&
+        input.activePinGroup?.serverId === placement.serverId &&
+        workspace?.pinGroupId === input.activePinGroup.groupId;
       if (isPinned) {
         pinnedWorkspaceKeys.push(placement.workspaceKey);
-        if (workspace?.pinnedAt) {
-          pinnedAtByKey[placement.workspaceKey] = workspace.pinnedAt;
+        if (workspace.pinGroupAssignedAt) {
+          pinAssignedAtByKey[placement.workspaceKey] = workspace.pinGroupAssignedAt;
         }
       }
     }
   }
-  return { pinnedWorkspaceKeys, pinnedAtByKey };
+  return { pinnedWorkspaceKeys, pinAssignedAtByKey };
 }
 
 function arePinnedSidebarKeysEqual(left: PinnedSidebarKeys, right: PinnedSidebarKeys): boolean {
@@ -79,7 +76,8 @@ function arePinnedSidebarKeysEqual(left: PinnedSidebarKeys, right: PinnedSidebar
     const workspaceKey = left.pinnedWorkspaceKeys[index];
     if (
       workspaceKey !== right.pinnedWorkspaceKeys[index] ||
-      (workspaceKey && left.pinnedAtByKey[workspaceKey] !== right.pinnedAtByKey[workspaceKey])
+      (workspaceKey &&
+        left.pinAssignedAtByKey[workspaceKey] !== right.pinAssignedAtByKey[workspaceKey])
     ) {
       return false;
     }
@@ -90,7 +88,7 @@ function arePinnedSidebarKeysEqual(left: PinnedSidebarKeys, right: PinnedSidebar
 export function usePinnedSidebarKeys(projects: SidebarProjectEntry[]): PinnedSidebarKeys {
   const previousKeysRef = useRef<PinnedSidebarKeys>({
     pinnedWorkspaceKeys: [],
-    pinnedAtByKey: {},
+    pinAssignedAtByKey: {},
   });
   const serverIds = useMemo(
     () =>
@@ -102,8 +100,7 @@ export function usePinnedSidebarKeys(projects: SidebarProjectEntry[]): PinnedSid
     [projects],
   );
   const supportsPinGroupsByServerId = useHostFeatureMap(serverIds, "workspacePinGroups");
-  const activePinGroupId = useSidebarViewStore((state) => state.activePinGroupId);
-  const activePinGroupServerId = useSidebarViewStore((state) => state.activePinGroupServerId);
+  const activePinGroup = useSidebarViewStore((state) => state.activePinGroup);
   const workspaceMaps = useStoreWithEqualityFn(
     useSessionStore,
     (state) => serverIds.map((serverId) => state.sessions[serverId]?.workspaces ?? null),
@@ -122,22 +119,14 @@ export function usePinnedSidebarKeys(projects: SidebarProjectEntry[]): PinnedSid
       projects,
       workspaceMaps: workspaceMapByServerId,
       supportsPinGroupsByServerId,
-      activePinGroupId,
-      activePinGroupServerId,
+      activePinGroup,
     });
     if (arePinnedSidebarKeysEqual(previousKeysRef.current, nextKeys)) {
       return previousKeysRef.current;
     }
     previousKeysRef.current = nextKeys;
     return nextKeys;
-  }, [
-    activePinGroupId,
-    activePinGroupServerId,
-    projects,
-    serverIds,
-    supportsPinGroupsByServerId,
-    workspaceMaps,
-  ]);
+  }, [activePinGroup, projects, serverIds, supportsPinGroupsByServerId, workspaceMaps]);
 }
 
 // Splits the sidebar into a dedicated Pinned section (chats) and the regular list below.
@@ -165,8 +154,8 @@ export function splitPinnedSidebarGroups(input: {
   }
 
   pinnedChats.sort((a, b) =>
-    (keys.pinnedAtByKey[b.workspaceKey] ?? "").localeCompare(
-      keys.pinnedAtByKey[a.workspaceKey] ?? "",
+    (keys.pinAssignedAtByKey[b.workspaceKey] ?? "").localeCompare(
+      keys.pinAssignedAtByKey[a.workspaceKey] ?? "",
     ),
   );
 

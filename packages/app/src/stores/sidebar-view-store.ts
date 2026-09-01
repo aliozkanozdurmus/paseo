@@ -9,9 +9,14 @@ export type SidebarGroupMode = "project" | "status";
 
 export const DEFAULT_WORKSPACE_PIN_GROUP_ID = "default";
 
+export interface WorkspacePinGroupSelection {
+  serverId: string;
+  groupId: string;
+}
+
 const SIDEBAR_VIEW_STORAGE_KEY = "sidebar-view";
 const LEGACY_SIDEBAR_GROUP_MODE_STORAGE_KEY = "sidebar-group-mode";
-const SIDEBAR_VIEW_STORE_VERSION = 8;
+const SIDEBAR_VIEW_STORE_VERSION = 9;
 
 /**
  * The key standing for "this workspace carries no labels at all".
@@ -49,8 +54,7 @@ function toggleFilterEntry(list: readonly string[], key: string): string[] {
 
 interface SidebarViewStoreState {
   groupMode: SidebarGroupMode;
-  activePinGroupId: string;
-  activePinGroupServerId: string | null;
+  activePinGroup: WorkspacePinGroupSelection | null;
   // Empty means "all hosts". A non-empty list pins the sidebar to those hosts.
   hostFilters: string[];
   /**
@@ -66,7 +70,7 @@ interface SidebarViewStoreState {
   projectFilters: string[];
   labelFilter: SidebarLabelFilter;
   setGroupMode: (mode: SidebarGroupMode) => void;
-  setActivePinGroupId: (groupId: string, serverId: string | null) => void;
+  setActivePinGroup: (selection: WorkspacePinGroupSelection | null) => void;
   toggleHostFilter: (serverId: string) => void;
   clearHostFilters: () => void;
   toggleProjectFilter: (viewKey: string) => void;
@@ -75,12 +79,12 @@ interface SidebarViewStoreState {
   clearLabelFilter: () => void;
   reconcileLabelFilter: (labels: readonly string[]) => void;
   reconcileHostFilters: (serverIds: readonly string[]) => void;
+  reconcilePinGroups: (serverId: string, groupIds: readonly string[]) => void;
 }
 
 interface SidebarViewPersistedState {
   groupMode: SidebarGroupMode;
-  activePinGroupId: string;
-  activePinGroupServerId: string | null;
+  activePinGroup: WorkspacePinGroupSelection | null;
   hostFilters: string[];
   projectFilters: string[];
   labelFilter: SidebarLabelFilter;
@@ -90,8 +94,15 @@ const PersistedSidebarGroupModeSchema = z.enum(["project", "status", "label"]);
 const SidebarLabelFilterSchema = z.object({
   labels: z.array(z.string()),
 });
+const WorkspacePinGroupSelectionSchema = z.object({
+  serverId: z.string(),
+  groupId: z.string(),
+});
 const SidebarViewPersistedStateSchema = z.strictObject({
   groupMode: PersistedSidebarGroupModeSchema.optional(),
+  activePinGroup: WorkspacePinGroupSelectionSchema.nullable().optional(),
+  // COMPAT(workspacePinGroupSelection): v7-v8 persisted these as parallel fields. Remove after
+  // 2027-03-01 once that client-state window has aged out.
   activePinGroupId: z.string().optional(),
   activePinGroupServerId: z.string().nullable().optional(),
   hostFilters: z.array(z.string()).optional(),
@@ -127,13 +138,29 @@ function readHostFilters(persistedState: SidebarViewStorageState): string[] {
   return legacyHostFilter ? [legacyHostFilter] : [];
 }
 
+function normalizePinGroupSelection(
+  selection: WorkspacePinGroupSelection | null | undefined,
+): WorkspacePinGroupSelection | null {
+  const serverId = selection?.serverId.trim() ?? "";
+  const groupId = selection?.groupId.trim() ?? "";
+  return serverId && groupId ? { serverId, groupId } : null;
+}
+
+function readPinGroupSelection(state: SidebarViewStorageState): WorkspacePinGroupSelection | null {
+  const selection = normalizePinGroupSelection(state.activePinGroup);
+  if (selection) return selection;
+
+  const serverId = state.activePinGroupServerId?.trim() ?? "";
+  const groupId = state.activePinGroupId?.trim() ?? "";
+  return serverId && groupId ? { serverId, groupId } : null;
+}
+
 export function migrateSidebarViewState(persistedState: unknown): SidebarViewPersistedState {
   const result = SidebarViewPersistedStateSchema.safeParse(persistedState);
   if (!result.success) {
     return {
       groupMode: "project",
-      activePinGroupId: DEFAULT_WORKSPACE_PIN_GROUP_ID,
-      activePinGroupServerId: null,
+      activePinGroup: null,
       hostFilters: [],
       projectFilters: [],
       labelFilter: emptyLabelFilter(),
@@ -145,22 +172,16 @@ export function migrateSidebarViewState(persistedState: unknown): SidebarViewPer
   if (legacyGroupMode) {
     return {
       groupMode: legacyGroupMode,
-      activePinGroupId: DEFAULT_WORKSPACE_PIN_GROUP_ID,
-      activePinGroupServerId: null,
+      activePinGroup: null,
       hostFilters: [],
       projectFilters: [],
       labelFilter: emptyLabelFilter(),
     };
   }
 
-  const activePinGroupId = state.activePinGroupId?.trim() || DEFAULT_WORKSPACE_PIN_GROUP_ID;
-  const activePinGroupServerId = state.activePinGroupServerId?.trim() || null;
-  const hasScopedCustomPinGroup =
-    activePinGroupId !== DEFAULT_WORKSPACE_PIN_GROUP_ID && activePinGroupServerId !== null;
   return {
     groupMode: state.groupMode === "status" ? "status" : "project",
-    activePinGroupId: hasScopedCustomPinGroup ? activePinGroupId : DEFAULT_WORKSPACE_PIN_GROUP_ID,
-    activePinGroupServerId: hasScopedCustomPinGroup ? activePinGroupServerId : null,
+    activePinGroup: readPinGroupSelection(state),
     hostFilters: readHostFilters(state),
     projectFilters: state.projectFilters ?? [],
     labelFilter: state.labelFilter
@@ -198,24 +219,13 @@ export const useSidebarViewStore = create<SidebarViewStoreState>()(
   persist(
     (set) => ({
       groupMode: "project",
-      activePinGroupId: DEFAULT_WORKSPACE_PIN_GROUP_ID,
-      activePinGroupServerId: null,
+      activePinGroup: null,
       hostFilters: [],
       projectFilters: [],
       labelFilter: emptyLabelFilter(),
       setGroupMode: (mode) => set({ groupMode: mode }),
-      setActivePinGroupId: (groupId, serverId) => {
-        const normalizedGroupId = groupId.trim() || DEFAULT_WORKSPACE_PIN_GROUP_ID;
-        const normalizedServerId = serverId?.trim() || null;
-        const hasScopedCustomPinGroup =
-          normalizedGroupId !== DEFAULT_WORKSPACE_PIN_GROUP_ID && normalizedServerId !== null;
-        set({
-          activePinGroupId: hasScopedCustomPinGroup
-            ? normalizedGroupId
-            : DEFAULT_WORKSPACE_PIN_GROUP_ID,
-          activePinGroupServerId: hasScopedCustomPinGroup ? normalizedServerId : null,
-        });
-      },
+      setActivePinGroup: (selection) =>
+        set({ activePinGroup: normalizePinGroupSelection(selection) }),
       toggleHostFilter: (serverId) =>
         set((state) => ({ hostFilters: toggleFilterEntry(state.hostFilters, serverId) })),
       clearHostFilters: () => set({ hostFilters: [] }),
@@ -245,19 +255,23 @@ export const useSidebarViewStore = create<SidebarViewStoreState>()(
           const allowed = new Set(serverIds);
           const hostFilters = state.hostFilters.filter((id) => allowed.has(id));
           const activePinGroupOwnerRemoved =
-            state.activePinGroupId !== DEFAULT_WORKSPACE_PIN_GROUP_ID &&
-            (!state.activePinGroupServerId || !allowed.has(state.activePinGroupServerId));
+            state.activePinGroup !== null && !allowed.has(state.activePinGroup.serverId);
           if (hostFilters.length === state.hostFilters.length && !activePinGroupOwnerRemoved) {
             return state;
           }
           return {
             hostFilters,
-            ...(activePinGroupOwnerRemoved
-              ? {
-                  activePinGroupId: DEFAULT_WORKSPACE_PIN_GROUP_ID,
-                  activePinGroupServerId: null,
-                }
-              : {}),
+            ...(activePinGroupOwnerRemoved ? { activePinGroup: null } : {}),
+          };
+        }),
+      reconcilePinGroups: (serverId, groupIds) =>
+        set((state) => {
+          if (state.activePinGroup?.serverId !== serverId) return state;
+          if (groupIds.includes(state.activePinGroup.groupId)) return state;
+          return {
+            activePinGroup: groupIds.includes(DEFAULT_WORKSPACE_PIN_GROUP_ID)
+              ? { serverId, groupId: DEFAULT_WORKSPACE_PIN_GROUP_ID }
+              : null,
           };
         }),
     }),
@@ -270,8 +284,7 @@ export const useSidebarViewStore = create<SidebarViewStoreState>()(
       ),
       partialize: (state) => ({
         groupMode: state.groupMode,
-        activePinGroupId: state.activePinGroupId,
-        activePinGroupServerId: state.activePinGroupServerId,
+        activePinGroup: state.activePinGroup,
         hostFilters: state.hostFilters,
         projectFilters: state.projectFilters,
         labelFilter: state.labelFilter,

@@ -57,6 +57,8 @@ $PASEO_HOME/
 ├── projects/
 │   ├── projects.json                    # Project registry
 │   ├── workspaces.json                  # Workspace registry
+│   ├── workspace-pin-groups.json        # Pin-group catalog and membership order
+│   ├── workspace-pin-groups.transaction.json # Recoverable pin-group/workspace commit
 │   ├── workspace-labels.json            # Shared host-local label catalog
 │   ├── workspace-labels.transaction.json # Recoverable catalog/assignment compound commit
 │   └── icons/                           # Host-local custom project icon images
@@ -435,11 +437,16 @@ workspace together with its owning project.
 
 ## 5. Workspace Registry
 
-**Path:** `$PASEO_HOME/projects/workspaces.json`
+**Paths:** `$PASEO_HOME/projects/workspaces.json`,
+`$PASEO_HOME/projects/workspace-pin-groups.json`, and
+`$PASEO_HOME/projects/workspace-pin-groups.transaction.json`
 
-The file is an envelope `{ workspaces, pinGroups }` so membership and the group catalog change in one
-atomic write. The reader still accepts the legacy workspace array and rewrites it as the envelope
-during initialization. A workspace is a specific working directory within a project.
+`workspaces.json` remains an array of workspace records so a downgraded daemon can still read every
+workspace. The pin-group sidecar owns its catalog and memberships. Both files use validated atomic
+writes. A prepared transaction journal stores raw before-images and restores both files
+byte-for-byte after an interrupted compound write; the committed marker means both data files are
+durable and only cleanup remains. A malformed primary file or sidecar blocks initialization and
+remains byte-for-byte untouched. A workspace is a specific working directory within a project.
 
 | Field                          | Type                                            | Description                                                                                                                                                                                   |
 | ------------------------------ | ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -459,16 +466,18 @@ during initialization. A workspace is a specific working directory within a proj
 | `archivedAt`                   | `string \| null` (ISO 8601)                     | Soft-delete; required nullable                                                                                                                                                                |
 | `autoArchivedChangeRequestUrl` | `string \| null`                                | Change request whose merged state triggered auto-archive. Restore replaces it with the current merged change request, when present, so repeated snapshots cannot archive the workspace again. |
 | `labels`                       | `string[]?`                                     | Normalized display names assigned from this host's shared label catalog. Missing means unlabelled.                                                                                            |
-| `pinGroupId`                   | `string \| null`                                | Membership in one daemon-shared pin group. Null means unpinned.                                                                                                                               |
 | `pinnedAt`                     | `string \| null` (ISO 8601)                     | Old-client pin projection. Non-null only for membership in the `default` group.                                                                                                               |
 
 > **Opaque-ID invariant:** `workspaceId` is opaque identity, never a filesystem path. Filesystem and git operations take `cwd`/`workspaceDirectory` only — never the id. A compatibility-only first-materialization bootstrap still groups pre-registry agent records by path and Git remote so existing installs retain their legacy records. That grouping never runs against a live registry, and its keys are not runtime project or workspace identity.
 
 ### Workspace pin groups
 
-Each group stores an opaque `id`, display `name`, and ISO `createdAt`. The daemon always owns the
-`default` group named `Pinned`; you cannot rename or delete it. Legacy records with `pinnedAt` join
-that group on initialization. Deleting another group clears its members in the same registry write.
+The sidecar stores `groups: [{ id, name, createdAt }]` and a workspace-keyed `memberships` object.
+Each membership contains one `groupId` and its ISO `assignedAt`, which is the ordering timestamp for
+that group. The daemon always owns the `default` group named `Pinned`; you cannot rename or delete
+it. Legacy records with `pinnedAt` join that group on initialization. The daemon continues writing
+`pinnedAt` only for default-group members so older builds can display those pins. Deleting another
+group removes its memberships without archiving its workspaces.
 
 ### Workspace label catalog
 

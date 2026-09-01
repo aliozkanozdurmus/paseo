@@ -139,9 +139,37 @@ describe("workspace pin group wire schemas", () => {
       scripts: [],
     };
     expect(WorkspaceDescriptorPayloadSchema.parse(descriptor).pinGroupId).toBeUndefined();
+    expect(WorkspaceDescriptorPayloadSchema.parse(descriptor).pinGroupAssignedAt).toBeUndefined();
     expect(
-      WorkspaceDescriptorPayloadSchema.parse({ ...descriptor, pinGroupId: "pgrp_focus" })
-        .pinGroupId,
-    ).toBe("pgrp_focus");
+      WorkspaceDescriptorPayloadSchema.parse({
+        ...descriptor,
+        pinGroupId: "pgrp_focus",
+        pinGroupAssignedAt: "2026-08-31T12:00:00.000Z",
+      }),
+    ).toMatchObject({
+      pinGroupId: "pgrp_focus",
+      pinGroupAssignedAt: "2026-08-31T12:00:00.000Z",
+    });
+  });
+
+  test("carries optional catalog invalidation on the existing workspace update channel", () => {
+    const parsed = SessionOutboundMessageSchema.parse({
+      type: "workspace_update",
+      payload: {
+        kind: "remove",
+        id: "ws-1",
+        pinGroups: [
+          {
+            id: "default",
+            name: "Pinned",
+            createdAt: "2026-08-31T12:00:00.000Z",
+          },
+        ],
+      },
+    });
+    expect(parsed).toMatchObject({
+      type: "workspace_update",
+      payload: { pinGroups: [{ id: "default" }] },
+    });
   });
 });

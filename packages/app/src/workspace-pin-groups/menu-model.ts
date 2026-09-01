@@ -1,5 +1,8 @@
 import type { WorkspacePinGroup } from "@getpaseo/protocol/messages";
-import { DEFAULT_WORKSPACE_PIN_GROUP_ID } from "@/stores/sidebar-view-store";
+import {
+  DEFAULT_WORKSPACE_PIN_GROUP_ID,
+  type WorkspacePinGroupSelection,
+} from "@/stores/sidebar-view-store";
 
 export type WorkspacePinGroupMenuActionId = "create" | "rename" | "delete";
 
@@ -14,50 +17,75 @@ export interface WorkspacePinGroupMenuModel {
   actions: WorkspacePinGroupMenuActionId[];
 }
 
+export type WorkspacePinAction =
+  | { kind: "set-membership"; selection: WorkspacePinGroupSelection }
+  | { kind: "update-host" }
+  | { kind: "host-disconnected" }
+  | { kind: "unavailable" };
+
+export function reconcileWorkspacePinGroupSelection(input: {
+  registeredServerIds: readonly string[];
+  activePinGroup: WorkspacePinGroupSelection | null;
+  activeWorkspaceServerId: string | null | undefined;
+}): WorkspacePinGroupSelection | null {
+  const activeWorkspaceServerId = input.activeWorkspaceServerId;
+  if (
+    !activeWorkspaceServerId ||
+    !input.registeredServerIds.includes(activeWorkspaceServerId) ||
+    input.activePinGroup?.serverId === activeWorkspaceServerId
+  ) {
+    return input.activePinGroup;
+  }
+  return {
+    serverId: activeWorkspaceServerId,
+    groupId: DEFAULT_WORKSPACE_PIN_GROUP_ID,
+  };
+}
+
 export function resolveWorkspacePinGroupServerId(input: {
-  connectedServerIds: readonly string[];
-  supportsPinGroupsByServerId: ReadonlyMap<string, boolean>;
-  activeGroupId: string;
-  activeGroupServerId: string | null | undefined;
+  registeredServerIds: readonly string[];
+  activePinGroup: WorkspacePinGroupSelection | null;
   activeWorkspaceServerId: string | null | undefined;
   hostFilters: readonly string[];
 }): string | null {
-  const capableServerIds = input.connectedServerIds.filter(
-    (serverId) => input.supportsPinGroupsByServerId.get(serverId) === true,
-  );
-  if (input.activeGroupId !== DEFAULT_WORKSPACE_PIN_GROUP_ID) {
-    return input.activeGroupServerId && capableServerIds.includes(input.activeGroupServerId)
-      ? input.activeGroupServerId
-      : null;
+  const activePinGroup = input.activePinGroup;
+  if (activePinGroup && input.registeredServerIds.includes(activePinGroup.serverId)) {
+    return activePinGroup.serverId;
   }
-  if (input.activeWorkspaceServerId && capableServerIds.includes(input.activeWorkspaceServerId)) {
+  if (
+    input.activeWorkspaceServerId &&
+    input.registeredServerIds.includes(input.activeWorkspaceServerId)
+  ) {
     return input.activeWorkspaceServerId;
   }
   const filteredServerId = input.hostFilters.length === 1 ? input.hostFilters[0] : null;
-  if (filteredServerId && capableServerIds.includes(filteredServerId)) {
+  if (filteredServerId && input.registeredServerIds.includes(filteredServerId)) {
     return filteredServerId;
   }
-  if (capableServerIds.length === 1) {
-    return capableServerIds[0] ?? null;
+  if (input.registeredServerIds.length === 1) {
+    return input.registeredServerIds[0] ?? null;
   }
-  return [...capableServerIds].sort().at(0) ?? null;
+  return [...input.registeredServerIds].sort().at(0) ?? null;
 }
 
-export function canWorkspaceUseActivePinGroup(input: {
+export function resolveWorkspacePinAction(input: {
   workspaceServerId: string | null | undefined;
-  supportsPinGroups: boolean;
-  supportsLegacyPinning: boolean;
-  activeGroupId: string;
-  activeGroupServerId: string | null | undefined;
-}): boolean {
-  if (input.activeGroupId === DEFAULT_WORKSPACE_PIN_GROUP_ID) {
-    return input.supportsPinGroups || input.supportsLegacyPinning;
+  pinGroupAvailability: boolean | null;
+  activePinGroup: WorkspacePinGroupSelection | null;
+}): WorkspacePinAction {
+  if (
+    input.workspaceServerId == null ||
+    input.workspaceServerId !== input.activePinGroup?.serverId
+  ) {
+    return { kind: "unavailable" };
   }
-  return (
-    input.supportsPinGroups &&
-    input.workspaceServerId != null &&
-    input.workspaceServerId === input.activeGroupServerId
-  );
+  if (input.pinGroupAvailability === null) {
+    return { kind: "host-disconnected" };
+  }
+  if (!input.pinGroupAvailability) {
+    return { kind: "update-host" };
+  }
+  return { kind: "set-membership", selection: input.activePinGroup };
 }
 
 export function buildWorkspacePinGroupMenuModel(input: {
