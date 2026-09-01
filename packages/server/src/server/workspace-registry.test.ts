@@ -1009,7 +1009,7 @@ describe("workspace registries", () => {
     expect(readFileSync(transactionPath, "utf8")).toBe(futureJournalBytes);
   });
 
-  test("refuses to roll a prepared journal over a newer legacy primary write", async () => {
+  test("converges a split prepared transaction around a newer legacy primary write", async () => {
     const filePath = path.join(tmpDir, "projects", "stale-journal-workspaces.json");
     const sidecarPath = path.join(tmpDir, "projects", "stale-journal-workspaces.pin-groups.json");
     const backupPath = path.join(
@@ -1017,12 +1017,19 @@ describe("workspace registries", () => {
       "projects",
       "stale-journal-workspaces.pin-groups.backup.json",
     );
+    const markerPath = path.join(
+      tmpDir,
+      "projects",
+      "stale-journal-workspaces.pin-groups.expected.json",
+    );
     const transactionPath = path.join(
       tmpDir,
       "projects",
       "stale-journal-workspaces.pin-groups.transaction.json",
     );
-    const registry = new FileBackedWorkspaceRegistry(filePath, logger);
+    const registry = new FileBackedWorkspaceRegistry(filePath, logger, {
+      now: () => "2026-08-31T12:00:00.000Z",
+    });
     await registry.initialize();
     await registry.upsert(
       createPersistedWorkspaceRecord({
@@ -1038,10 +1045,94 @@ describe("workspace registries", () => {
     const beforeWorkspaceBytes = readFileSync(filePath, "utf8");
     const beforeSidecarBytes = readFileSync(sidecarPath, "utf8");
     const beforeBackupBytes = readFileSync(backupPath, "utf8");
+    const beforeMarkerBytes = readFileSync(markerPath, "utf8");
     const afterPinGroups = JSON.parse(beforeSidecarBytes);
     afterPinGroups.groups.push({
       id: "pgrp_interrupted",
       name: "Interrupted",
+      createdAt: "2026-08-31T13:00:00.000Z",
+    });
+    afterPinGroups.memberships["ws-newer-primary"] = {
+      groupId: "pgrp_interrupted",
+      assignedAt: "2026-08-31T13:00:00.000Z",
+    };
+    const afterSidecarBytes = serializedJson(afterPinGroups);
+    writeFileSync(
+      transactionPath,
+      serializedJson(
+        pinGroupTransaction({
+          phase: "prepared",
+          beforeWorkspaces: beforeWorkspaceBytes,
+          afterWorkspaces: JSON.parse(beforeWorkspaceBytes),
+          beforePinGroups: beforeSidecarBytes,
+          afterPinGroups,
+          beforePinGroupsBackup: beforeBackupBytes,
+          beforeMarker: beforeMarkerBytes,
+        }),
+      ),
+    );
+    // Exact interrupted window: the sidecar reached its after-image, while its
+    // mirror remained at the before-image and the old daemon then wrote primary.
+    writeFileSync(sidecarPath, afterSidecarBytes);
+    const legacyRecords = JSON.parse(beforeWorkspaceBytes);
+    legacyRecords[0].displayName = "written by old daemon";
+    legacyRecords[0].updatedAt = "2026-08-31T14:00:00.000Z";
+    const newerPrimaryBytes = serializedJson(legacyRecords);
+    writeFileSync(filePath, newerPrimaryBytes);
+
+    const reloaded = new FileBackedWorkspaceRegistry(filePath, logger);
+    await reloaded.initialize();
+
+    expect(await reloaded.get("ws-newer-primary")).toMatchObject({
+      displayName: "written by old daemon",
+      updatedAt: "2026-08-31T14:00:00.000Z",
+      pinGroupId: "pgrp_interrupted",
+      pinGroupAssignedAt: "2026-08-31T13:00:00.000Z",
+      pinnedAt: null,
+    });
+    expect((await reloaded.listPinGroups()).map((group) => group.id)).toEqual([
+      DEFAULT_WORKSPACE_PIN_GROUP_ID,
+      "pgrp_interrupted",
+    ]);
+    expect(readFileSync(filePath, "utf8")).toBe(newerPrimaryBytes);
+    const convergedSidecarBytes = readFileSync(sidecarPath, "utf8");
+    expect(readFileSync(backupPath, "utf8")).toBe(convergedSidecarBytes);
+    expect(JSON.parse(convergedSidecarBytes)).toMatchObject({
+      primaryContentHash: fileHash(newerPrimaryBytes),
+      memberships: {
+        "ws-newer-primary": {
+          groupId: "pgrp_interrupted",
+          assignedAt: "2026-08-31T13:00:00.000Z",
+        },
+      },
+    });
+    expect(existsSync(transactionPath)).toBe(false);
+  });
+
+  test("blocks a missing prepared auxiliary artifact until the whole snapshot is restored", async () => {
+    const filePath = path.join(tmpDir, "projects", "ambiguous-workspaces.json");
+    const sidecarPath = path.join(tmpDir, "projects", "ambiguous-workspaces.pin-groups.json");
+    const backupPath = path.join(tmpDir, "projects", "ambiguous-workspaces.pin-groups.backup.json");
+    const markerPath = path.join(
+      tmpDir,
+      "projects",
+      "ambiguous-workspaces.pin-groups.expected.json",
+    );
+    const transactionPath = path.join(
+      tmpDir,
+      "projects",
+      "ambiguous-workspaces.pin-groups.transaction.json",
+    );
+    const baseline = new FileBackedWorkspaceRegistry(filePath, logger);
+    await baseline.initialize();
+    const beforeWorkspaceBytes = readFileSync(filePath, "utf8");
+    const beforeSidecarBytes = readFileSync(sidecarPath, "utf8");
+    const beforeBackupBytes = readFileSync(backupPath, "utf8");
+    const beforeMarkerBytes = readFileSync(markerPath, "utf8");
+    const afterPinGroups = JSON.parse(beforeSidecarBytes);
+    afterPinGroups.groups.push({
+      id: "pgrp_ambiguous",
+      name: "Ambiguous",
       createdAt: "2026-08-31T13:00:00.000Z",
     });
     writeFileSync(
@@ -1054,28 +1145,42 @@ describe("workspace registries", () => {
           beforePinGroups: beforeSidecarBytes,
           afterPinGroups,
           beforePinGroupsBackup: beforeBackupBytes,
+          beforeMarker: beforeMarkerBytes,
         }),
       ),
     );
-    const legacyRecords = JSON.parse(beforeWorkspaceBytes);
-    legacyRecords[0].displayName = "written by old daemon";
-    legacyRecords[0].updatedAt = "2026-08-31T14:00:00.000Z";
-    const newerPrimaryBytes = serializedJson(legacyRecords);
+    const newerPrimaryBytes = `${beforeWorkspaceBytes}\n`;
     writeFileSync(filePath, newerPrimaryBytes);
+    rmSync(backupPath);
+    const journalBytes = readFileSync(transactionPath, "utf8");
 
-    const reloaded = new FileBackedWorkspaceRegistry(filePath, logger);
-    const failure = await reloaded.initialize().catch((cause: unknown) => cause);
+    const blocked = new FileBackedWorkspaceRegistry(filePath, logger);
+    const failure = await blocked.initialize().catch((cause: unknown) => cause);
     expect(failure).toBeInstanceOf(WorkspaceRegistryIntegrityError);
     expect(failure).toBeInstanceOf(Error);
     const message = (failure as Error).message;
-    expect(message).toContain(filePath);
-    expect(message).toContain(transactionPath);
-    expect(message).toContain(`delete the journal at ${transactionPath}`);
-    expect(message).toContain(`restore ${filePath} from a verified copy`);
+    expect(message).toContain(`restore ${filePath} to SHA-256 ${fileHash(beforeWorkspaceBytes)}`);
+    expect(message).toContain(`restore ${sidecarPath} to SHA-256 ${fileHash(beforeSidecarBytes)}`);
+    expect(message).toContain(`restore ${backupPath} to SHA-256 ${fileHash(beforeBackupBytes)}`);
+    expect(message).toContain(`restore ${markerPath} to SHA-256 ${fileHash(beforeMarkerBytes)}`);
+    expect(message).toContain(`delete ${transactionPath}`);
     expect(readFileSync(filePath, "utf8")).toBe(newerPrimaryBytes);
     expect(readFileSync(sidecarPath, "utf8")).toBe(beforeSidecarBytes);
-    expect(readFileSync(backupPath, "utf8")).toBe(beforeBackupBytes);
-    expect(existsSync(transactionPath)).toBe(true);
+    expect(existsSync(backupPath)).toBe(false);
+    expect(readFileSync(markerPath, "utf8")).toBe(beforeMarkerBytes);
+    expect(readFileSync(transactionPath, "utf8")).toBe(journalBytes);
+
+    // Follow the advertised complete-snapshot recovery exactly.
+    writeFileSync(filePath, beforeWorkspaceBytes);
+    writeFileSync(sidecarPath, beforeSidecarBytes);
+    writeFileSync(backupPath, beforeBackupBytes);
+    writeFileSync(markerPath, beforeMarkerBytes);
+    rmSync(transactionPath);
+    const recovered = new FileBackedWorkspaceRegistry(filePath, logger);
+    await recovered.initialize();
+    expect((await recovered.listPinGroups()).map((group) => group.id)).toEqual([
+      DEFAULT_WORKSPACE_PIN_GROUP_ID,
+    ]);
   });
 
   test("rolls back a durable prepared journal whose write acknowledgement is lost", async () => {
@@ -1395,6 +1500,105 @@ describe("workspace registries", () => {
           assignedAt: "2026-08-31T13:00:00.000Z",
         },
       },
+    });
+    expect(existsSync(transactionPath)).toBe(false);
+  });
+
+  test("leaves every artifact untouched when a committed journal has a corrupt later primary", async () => {
+    const filePath = path.join(tmpDir, "projects", "corrupt-committed-workspaces.json");
+    const sidecarPath = path.join(
+      tmpDir,
+      "projects",
+      "corrupt-committed-workspaces.pin-groups.json",
+    );
+    const backupPath = path.join(
+      tmpDir,
+      "projects",
+      "corrupt-committed-workspaces.pin-groups.backup.json",
+    );
+    const markerPath = path.join(
+      tmpDir,
+      "projects",
+      "corrupt-committed-workspaces.pin-groups.expected.json",
+    );
+    const transactionPath = path.join(
+      tmpDir,
+      "projects",
+      "corrupt-committed-workspaces.pin-groups.transaction.json",
+    );
+    const baseline = new FileBackedWorkspaceRegistry(filePath, logger, {
+      pinGroupIdFactory: () => "pgrp_corrupt_committed",
+      now: () => "2026-08-31T12:00:00.000Z",
+    });
+    await baseline.initialize();
+    await baseline.upsert(
+      createPersistedWorkspaceRecord({
+        workspaceId: "ws-corrupt-committed",
+        projectId: "proj-1",
+        cwd: "/tmp/corrupt-committed",
+        kind: "directory",
+        displayName: "corrupt-committed",
+        createdAt: "2026-08-31T12:00:00.000Z",
+        updatedAt: "2026-08-31T12:00:00.000Z",
+      }),
+    );
+    const group = await baseline.createPinGroup("Corrupt committed");
+    const beforeWorkspaceBytes = readFileSync(filePath, "utf8");
+    const beforeSidecarBytes = readFileSync(sidecarPath, "utf8");
+    const beforeBackupBytes = readFileSync(backupPath, "utf8");
+    const beforeMarkerBytes = readFileSync(markerPath, "utf8");
+    await baseline.setWorkspacePinGroup({
+      workspaceId: "ws-corrupt-committed",
+      groupId: group.id,
+      updatedAt: "2026-08-31T13:00:00.000Z",
+    });
+    const afterWorkspaceBytes = readFileSync(filePath, "utf8");
+    const afterSidecarBytes = readFileSync(sidecarPath, "utf8");
+    writeFileSync(
+      transactionPath,
+      serializedJson(
+        pinGroupTransaction({
+          phase: "committed",
+          beforeWorkspaces: beforeWorkspaceBytes,
+          afterWorkspaces: JSON.parse(afterWorkspaceBytes),
+          beforePinGroups: beforeSidecarBytes,
+          afterPinGroups: JSON.parse(afterSidecarBytes),
+          beforePinGroupsBackup: beforeBackupBytes,
+          beforeMarker: beforeMarkerBytes,
+        }),
+      ),
+    );
+    const corruptPrimaryBytes = "CORRUPT_LATER_PRIMARY_WITH_COMMITTED_JOURNAL";
+    writeFileSync(filePath, corruptPrimaryBytes);
+    const untouched = {
+      primary: readFileSync(filePath, "utf8"),
+      sidecar: readFileSync(sidecarPath, "utf8"),
+      backup: readFileSync(backupPath, "utf8"),
+      marker: readFileSync(markerPath, "utf8"),
+      journal: readFileSync(transactionPath, "utf8"),
+    };
+
+    const blocked = new FileBackedWorkspaceRegistry(filePath, logger);
+    const failure = await blocked.initialize().catch((cause: unknown) => cause);
+    expect(failure).toBeInstanceOf(WorkspaceRegistryIntegrityError);
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toContain(filePath);
+    expect((failure as Error).message).toContain(transactionPath);
+    expect((failure as Error).message).toContain("not valid workspace-registry JSON");
+    expect(readFileSync(filePath, "utf8")).toBe(untouched.primary);
+    expect(readFileSync(sidecarPath, "utf8")).toBe(untouched.sidecar);
+    expect(readFileSync(backupPath, "utf8")).toBe(untouched.backup);
+    expect(readFileSync(markerPath, "utf8")).toBe(untouched.marker);
+    expect(readFileSync(transactionPath, "utf8")).toBe(untouched.journal);
+
+    // Follow the advertised recovery: repair only primary, retain the journal,
+    // then let committed recovery validate and converge the complete state.
+    writeFileSync(filePath, afterWorkspaceBytes);
+    const recovered = new FileBackedWorkspaceRegistry(filePath, logger);
+    await recovered.initialize();
+    expect(await recovered.get("ws-corrupt-committed")).toMatchObject({
+      pinGroupId: group.id,
+      pinGroupAssignedAt: "2026-08-31T13:00:00.000Z",
     });
     expect(existsSync(transactionPath)).toBe(false);
   });

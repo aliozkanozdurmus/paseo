@@ -322,7 +322,6 @@ test.describe("Workspace pin groups", () => {
     });
 
     try {
-      const mutationGate = await installPinGroupMutationGate(page, { rejectFirstRename: true });
       await gotoAppShell(page);
       await expect(workspaceRow(page, alpha.workspaceId)).toContainText(ALPHA_WORKSPACE_NAME, {
         timeout: 30_000,
@@ -331,24 +330,15 @@ test.describe("Workspace pin groups", () => {
         timeout: 30_000,
       });
 
-      await test.step("pins one workspace in the default group", async () => {
-        await pinWorkspaceFromSidebar(page, alpha.workspaceId);
-        await expectOnlyWorkspacePinned(page, alpha, beta);
-      });
+      await pinWorkspaceFromSidebar(page, alpha.workspaceId);
+      await expectOnlyWorkspacePinned(page, alpha, beta);
 
-      await test.step("creates a second group and pins the other workspace there", async () => {
-        await createPinGroup(page, SECOND_GROUP_NAME);
-        const secondGroupId = await switchPinGroup(page, SECOND_GROUP_NAME);
-        expect(secondGroupId).not.toBe("default");
+      await createPinGroup(page, RENAMED_GROUP_NAME);
+      const secondGroupId = await switchPinGroup(page, RENAMED_GROUP_NAME);
+      expect(secondGroupId).not.toBe("default");
 
-        await pinWorkspaceFromSidebar(page, beta.workspaceId);
-        await expectOnlyWorkspacePinned(page, beta, alpha);
-      });
-
-      await test.step("keeps a failed rename visible and allows a successful retry", async () => {
-        await renameActivePinGroupWithRetry(page, RENAMED_GROUP_NAME);
-        expect(mutationGate.renameAttemptCount()).toBe(2);
-      });
+      await pinWorkspaceFromSidebar(page, beta.workspaceId);
+      await expectOnlyWorkspacePinned(page, beta, alpha);
 
       const defaultGroupId = await switchPinGroup(page, DEFAULT_GROUP_NAME);
       expect(defaultGroupId).toBe("default");
@@ -359,7 +349,7 @@ test.describe("Workspace pin groups", () => {
         fullPage: true,
       });
 
-      const secondGroupId = await switchPinGroup(page, RENAMED_GROUP_NAME);
+      await switchPinGroup(page, RENAMED_GROUP_NAME);
       await expectOnlyWorkspacePinned(page, beta, alpha);
 
       await page.reload();
@@ -373,34 +363,169 @@ test.describe("Workspace pin groups", () => {
         fullPage: true,
       });
 
-      await test.step("captures the open switcher with both group choices", async () => {
-        await openPinGroupSwitcher(page);
-        await expect(pinGroupChoice(page, DEFAULT_GROUP_NAME)).toHaveCount(1);
-        await expect(pinGroupChoice(page, RENAMED_GROUP_NAME)).toHaveCount(1);
-        await hideExpoFastRefreshOverlay(page);
-        await page.screenshot({
-          path: testInfo.outputPath("pin-group-switcher-menu-open.png"),
-          fullPage: true,
-        });
-        await pinGroupChoice(page, RENAMED_GROUP_NAME).click();
-        await expectPinGroupsMenuClosed(page);
+      await openPinGroupSwitcher(page);
+      await expect(pinGroupChoice(page, DEFAULT_GROUP_NAME)).toHaveCount(1);
+      await expect(pinGroupChoice(page, RENAMED_GROUP_NAME)).toHaveCount(1);
+      await hideExpoFastRefreshOverlay(page);
+      await page.screenshot({
+        path: testInfo.outputPath("pin-group-switcher-menu-open.png"),
+        fullPage: true,
       });
-
-      await test.step("deletes the group without archiving its workspace", async () => {
-        await deleteActivePinGroup(page, RENAMED_GROUP_NAME);
-        await expect(page.getByTestId("sidebar-pin-groups-menu-trigger")).toContainText(
-          DEFAULT_GROUP_NAME,
-          { timeout: 10_000 },
-        );
-        await expectOnlyWorkspacePinned(page, alpha, beta);
-        await expect(workspaceRow(page, beta.workspaceId)).toBeVisible({ timeout: 10_000 });
-        const unpinnedWorkspace = await fetchWorkspaceDescriptor(beta);
-        expect(unpinnedWorkspace.pinGroupId ?? null).toBeNull();
-        expect(unpinnedWorkspace.archivedAt ?? null).toBeNull();
-      });
+      await pinGroupChoice(page, RENAMED_GROUP_NAME).click();
+      await expectPinGroupsMenuClosed(page);
     } finally {
       await beta.cleanup();
       await alpha.cleanup();
+    }
+  });
+
+  test("keeps a failed rename visible and allows a successful retry", async ({ page }) => {
+    const workspace = await seedWorkspace({
+      repoPrefix: "pin-groups-rename-retry-",
+      title: "Rename retry workspace",
+    });
+
+    try {
+      const mutationGate = await installPinGroupMutationGate(page, { rejectFirstRename: true });
+      await gotoAppShell(page);
+      await expect(workspaceRow(page, workspace.workspaceId)).toBeVisible({ timeout: 30_000 });
+
+      await createPinGroup(page, SECOND_GROUP_NAME);
+      await switchPinGroup(page, SECOND_GROUP_NAME);
+      await renameActivePinGroupWithRetry(page, "Retry renamed");
+
+      expect(mutationGate.renameAttemptCount()).toBe(2);
+      await expect(page.getByTestId("sidebar-pin-groups-menu-trigger")).toContainText(
+        "Retry renamed",
+      );
+    } finally {
+      await workspace.cleanup();
+    }
+  });
+
+  test("deletes a group without archiving its workspace", async ({ page }) => {
+    const alpha = await seedWorkspace({
+      repoPrefix: "pin-groups-delete-alpha-",
+      title: ALPHA_WORKSPACE_NAME,
+    });
+    const beta = await seedWorkspace({
+      repoPrefix: "pin-groups-delete-beta-",
+      title: BETA_WORKSPACE_NAME,
+    });
+
+    try {
+      await gotoAppShell(page);
+      await expect(workspaceRow(page, alpha.workspaceId)).toBeVisible({ timeout: 30_000 });
+      await expect(workspaceRow(page, beta.workspaceId)).toBeVisible({ timeout: 30_000 });
+
+      await pinWorkspaceFromSidebar(page, alpha.workspaceId);
+      await createPinGroup(page, "Delete group");
+      await switchPinGroup(page, "Delete group");
+      await pinWorkspaceFromSidebar(page, beta.workspaceId);
+      await expectOnlyWorkspacePinned(page, beta, alpha);
+
+      await deleteActivePinGroup(page, "Delete group");
+      await expect(page.getByTestId("sidebar-pin-groups-menu-trigger")).toContainText(
+        DEFAULT_GROUP_NAME,
+        { timeout: 10_000 },
+      );
+      await expectOnlyWorkspacePinned(page, alpha, beta);
+      await expect(workspaceRow(page, beta.workspaceId)).toBeVisible({ timeout: 10_000 });
+      const unpinnedWorkspace = await fetchWorkspaceDescriptor(beta);
+      expect(unpinnedWorkspace.pinGroupId ?? null).toBeNull();
+      expect(unpinnedWorkspace.archivedAt ?? null).toBeNull();
+    } finally {
+      await beta.cleanup();
+      await alpha.cleanup();
+    }
+  });
+
+  test("renames a group through the compact bottom sheet", async ({ page }) => {
+    const workspace = await seedWorkspace({
+      repoPrefix: "pin-groups-compact-rename-",
+      title: "Compact rename workspace",
+    });
+
+    try {
+      await page.setViewportSize({ width: 390, height: 844 });
+      await gotoAppShell(page);
+      await openMobileAgentSidebar(page);
+      await expect(workspaceRow(page, workspace.workspaceId)).toBeVisible({ timeout: 30_000 });
+
+      await createPinGroup(page, "Compact group");
+      await switchPinGroup(page, "Compact group");
+      await openPinGroupsMenu(page);
+      await expect(bottomSheetBackdrop(page)).toBeVisible();
+      await page.getByTestId("sidebar-pin-group-rename").click();
+
+      const input = page.getByTestId("sidebar-pin-group-rename-input");
+      await expect(input).toBeVisible();
+      await input.fill("Compact renamed");
+      await page.getByTestId("sidebar-pin-group-rename-submit").click();
+
+      await expect(page.getByTestId("sidebar-pin-groups-menu-trigger")).toContainText(
+        "Compact renamed",
+        { timeout: 10_000 },
+      );
+      await expect(input).toHaveCount(0);
+      await closePinGroupsMenu(page);
+    } finally {
+      await workspace.cleanup();
+    }
+  });
+
+  test("retries a rejected compact-sheet delete without duplicate requests", async ({ page }) => {
+    const workspace = await seedWorkspace({
+      repoPrefix: "pin-groups-compact-delete-",
+      title: "Compact delete workspace",
+    });
+
+    try {
+      await page.setViewportSize({ width: 390, height: 844 });
+      const mutationGate = await installPinGroupMutationGate(page, { rejectFirstDelete: true });
+      await gotoAppShell(page);
+      await openMobileAgentSidebar(page);
+      await expect(workspaceRow(page, workspace.workspaceId)).toBeVisible({ timeout: 30_000 });
+
+      await createPinGroup(page, "Compact delete");
+      const groupId = await switchPinGroup(page, "Compact delete");
+      await pinWorkspaceFromServerSidebar(page, workspace.workspaceId, getServerId());
+      await expectPinGroupId(workspace, groupId);
+
+      await openPinGroupsMenu(page);
+      await expect(bottomSheetBackdrop(page)).toBeVisible();
+      const firstConfirmationMessage = acceptNextDialog(page);
+      const deleteItem = page.getByTestId("sidebar-pin-group-delete");
+      await deleteItem.click();
+      await expect(firstConfirmationMessage).resolves.toContain("Compact delete");
+      await expect(deleteItem).toBeDisabled();
+      await deleteItem.dispatchEvent("click");
+
+      await expect(page.getByTestId("app-toast-message")).toContainText(DELETE_REJECTED_ERROR, {
+        timeout: 10_000,
+      });
+      expect(mutationGate.deleteAttemptCount()).toBe(1);
+      await expect(deleteItem).toBeEnabled();
+      await expect(page.getByTestId("sidebar-pin-groups-menu-trigger")).toContainText(
+        "Compact delete",
+      );
+      await expectPinGroupId(workspace, groupId);
+
+      const retryConfirmationMessage = acceptNextDialog(page);
+      await deleteItem.click();
+      await expect(retryConfirmationMessage).resolves.toContain("Compact delete");
+
+      await expect(page.getByTestId("sidebar-pin-groups-menu-trigger")).toContainText(
+        DEFAULT_GROUP_NAME,
+        { timeout: 10_000 },
+      );
+      expect(mutationGate.deleteAttemptCount()).toBe(2);
+      await expectPinGroupId(workspace, null);
+      const descriptor = await fetchWorkspaceDescriptor(workspace);
+      expect(descriptor.pinGroupId ?? null).toBeNull();
+      expect(descriptor.archivedAt ?? null).toBeNull();
+    } finally {
+      await workspace.cleanup();
     }
   });
 
@@ -484,87 +609,6 @@ test.describe("Workspace pin groups", () => {
       await secondary?.cleanup();
       await secondaryDaemon.close();
       await primary.cleanup();
-    }
-  });
-
-  test("renames and deletes a group through the compact bottom sheet", async ({ page }) => {
-    const workspace = await seedWorkspace({
-      repoPrefix: "pin-groups-compact-sheet-",
-      title: "Compact pin group workspace",
-    });
-
-    try {
-      await page.setViewportSize({ width: 390, height: 844 });
-      const mutationGate = await installPinGroupMutationGate(page, { rejectFirstDelete: true });
-      await gotoAppShell(page);
-      await openMobileAgentSidebar(page);
-      await expect(workspaceRow(page, workspace.workspaceId)).toBeVisible({ timeout: 30_000 });
-
-      await createPinGroup(page, "Compact group");
-      const groupId = await switchPinGroup(page, "Compact group");
-      await pinWorkspaceFromServerSidebar(page, workspace.workspaceId, getServerId());
-      await expectPinGroupId(workspace, groupId);
-
-      await test.step("renames through the sheet text field", async () => {
-        await openPinGroupsMenu(page);
-        await expect(
-          page.getByRole("button", { name: "Bottom sheet backdrop" }).first(),
-        ).toBeVisible();
-        await page.getByTestId("sidebar-pin-group-rename").click();
-
-        const input = page.getByTestId("sidebar-pin-group-rename-input");
-        await expect(input).toBeVisible();
-        await input.fill("Compact Focus");
-        await page.getByTestId("sidebar-pin-group-rename-submit").click();
-
-        await expect(page.getByTestId("sidebar-pin-groups-menu-trigger")).toContainText(
-          "Compact Focus",
-          { timeout: 10_000 },
-        );
-        await expect(input).toHaveCount(0);
-        await closePinGroupsMenu(page);
-      });
-
-      await test.step("keeps a rejected delete retryable and prevents duplicate requests", async () => {
-        await openPinGroupsMenu(page);
-        await expect(
-          page.getByRole("button", { name: "Bottom sheet backdrop" }).first(),
-        ).toBeVisible();
-        const confirmationMessage = acceptNextDialog(page);
-        const deleteItem = page.getByTestId("sidebar-pin-group-delete");
-        await deleteItem.click();
-        await expect(confirmationMessage).resolves.toContain("Compact Focus");
-        await expect(deleteItem).toBeDisabled();
-        await deleteItem.dispatchEvent("click");
-
-        await expect(page.getByTestId("app-toast-message")).toContainText(DELETE_REJECTED_ERROR, {
-          timeout: 10_000,
-        });
-        expect(mutationGate.deleteAttemptCount()).toBe(1);
-        await expect(deleteItem).toBeEnabled();
-        await expect(page.getByTestId("sidebar-pin-groups-menu-trigger")).toContainText(
-          "Compact Focus",
-        );
-        await expectPinGroupId(workspace, groupId);
-      });
-
-      await test.step("retries delete through the sheet and unpins the workspace", async () => {
-        const confirmationMessage = acceptNextDialog(page);
-        await page.getByTestId("sidebar-pin-group-delete").click();
-        await expect(confirmationMessage).resolves.toContain("Compact Focus");
-
-        await expect(page.getByTestId("sidebar-pin-groups-menu-trigger")).toContainText(
-          DEFAULT_GROUP_NAME,
-          { timeout: 10_000 },
-        );
-        expect(mutationGate.deleteAttemptCount()).toBe(2);
-        await expectPinGroupId(workspace, null);
-        const descriptor = await fetchWorkspaceDescriptor(workspace);
-        expect(descriptor.pinGroupId ?? null).toBeNull();
-        expect(descriptor.archivedAt ?? null).toBeNull();
-      });
-    } finally {
-      await workspace.cleanup();
     }
   });
 });

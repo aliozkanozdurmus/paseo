@@ -239,6 +239,15 @@ export type PersistedWorkspacePinGroupsFile = z.infer<typeof WorkspacePinGroupsF
 type RawFileBeforeImage = z.infer<typeof RawFileBeforeImageSchema>;
 type PersistedWorkspacePinGroupsTransaction = z.infer<typeof WorkspacePinGroupsTransactionSchema>;
 
+interface PinGroupTransactionFileState {
+  label: string;
+  filePath: string;
+  before: RawFileBeforeImage;
+  current: RawFileBeforeImage;
+  afterContents: string;
+  currentMatchesAfter: boolean;
+}
+
 function serializeJsonFile(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
@@ -1382,25 +1391,29 @@ export class FileBackedWorkspaceRegistry
     const transaction = await this.readPinGroupTransaction();
     if (!transaction) return;
     if (transaction.phase === "prepared") {
-      await this.restorePinGroupTransactionBeforeState(transaction);
+      await this.recoverPreparedPinGroupTransaction(transaction);
       return;
     }
     await this.replayCommittedPinGroupTransaction(transaction);
     await fs.rm(this.pinGroupsTransactionFilePath, { force: true }).catch(() => undefined);
   }
 
-  private async restorePinGroupTransactionBeforeState(
+  private async recoverPreparedPinGroupTransaction(
     transaction: PersistedWorkspacePinGroupsTransaction,
   ): Promise<void> {
     const files = await this.readPinGroupTransactionFileStates(transaction);
+    const primary = files[0]!;
+    const auxiliary = files.slice(1);
+    const primaryHasLaterWrite = this.fileHasThirdState(primary);
+    if (primaryHasLaterWrite) {
+      this.assertLaterPrimaryIsValid(primary, "prepared");
+      await this.replayTransactionAfterImages(transaction.phase, auxiliary, files);
+      await fs.rm(this.pinGroupsTransactionFilePath, { force: true });
+      return;
+    }
     for (const file of files) {
       if (!this.rawFileImageMatches(file.current, file.before) && !file.currentMatchesAfter) {
-        const restoreStep = file.before.exists
-          ? `restore ${file.filePath} from a verified copy with SHA-256 ${file.before.contentHash}`
-          : `delete the newer file at ${file.filePath}`;
-        throw new WorkspaceRegistryIntegrityError(
-          `Workspace pin-group prepared transaction conflicts with a newer ${file.label} file. Conflicting file: ${file.filePath}. Primary registry: ${this.registryFilePath}. Journal: ${this.pinGroupsTransactionFilePath}. Refusing to overwrite current data. Recovery: inspect the primary registry and journal; delete the journal at ${this.pinGroupsTransactionFilePath} to keep the current registry, or ${restoreStep}, then delete the journal and restart the daemon.`,
-        );
+        throw this.ambiguousTransactionStateError(transaction.phase, file, files);
       }
     }
     for (const file of files) {
@@ -1414,29 +1427,39 @@ export class FileBackedWorkspaceRegistry
   private async replayCommittedPinGroupTransaction(
     transaction: PersistedWorkspacePinGroupsTransaction,
   ): Promise<void> {
-    const [primary, ...auxiliary] = await this.readPinGroupTransactionFileStates(transaction);
-    if (!primary) {
+    const files = await this.readPinGroupTransactionFileStates(transaction);
+    const primary = files[0]!;
+    const auxiliary = files.slice(1);
+    const primaryHasLaterWrite = this.fileHasThirdState(primary);
+    if (primaryHasLaterWrite) {
+      this.assertLaterPrimaryIsValid(primary, "committed");
+    }
+    const filesToReplay = primaryHasLaterWrite ? auxiliary : [primary, ...auxiliary];
+    await this.replayTransactionAfterImages(transaction.phase, filesToReplay, files);
+  }
+
+  private assertLaterPrimaryIsValid(
+    primary: PinGroupTransactionFileState,
+    phase: "prepared" | "committed",
+  ): void {
+    try {
+      const value: unknown = JSON.parse(primary.current.exists ? primary.current.contents : "");
+      WorkspaceRegistryFileSchema.parse(value);
+    } catch (error) {
       throw new WorkspaceRegistryIntegrityError(
-        `Workspace pin-group committed transaction at ${this.pinGroupsTransactionFilePath} has no primary registry state. Inspect the journal and restore ${this.registryFilePath} from backup before restarting the daemon.`,
+        `Workspace registry ${this.registryFilePath} changed after the ${phase} pin-group transaction but is not valid workspace-registry JSON. Journal retained at ${this.pinGroupsTransactionFilePath}; no registry or pin-group artifact was changed. Restore ${this.registryFilePath} to valid workspace-array JSON, leave ${this.pinGroupsTransactionFilePath} in place, then restart the daemon. Validation error: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
-    const primaryHasLaterWrite =
-      primary.current.exists &&
-      !primary.currentMatchesAfter &&
-      !this.rawFileImageMatches(primary.current, primary.before);
-    const filesToReplay = primaryHasLaterWrite ? auxiliary : [primary, ...auxiliary];
+  }
+
+  private async replayTransactionAfterImages(
+    phase: "prepared" | "committed",
+    filesToReplay: PinGroupTransactionFileState[],
+    allFiles: PinGroupTransactionFileState[],
+  ): Promise<void> {
     for (const file of filesToReplay) {
-      if (
-        file.current.exists &&
-        !file.currentMatchesAfter &&
-        !this.rawFileImageMatches(file.current, file.before)
-      ) {
-        const restoreStep = file.before.exists
-          ? `restore ${file.filePath} from a verified copy with SHA-256 ${file.before.contentHash}`
-          : `delete the newer file at ${file.filePath}`;
-        throw new WorkspaceRegistryIntegrityError(
-          `Workspace pin-group committed transaction conflicts with the current ${file.label}. Conflicting file: ${file.filePath}. Primary registry: ${this.registryFilePath}. Journal: ${this.pinGroupsTransactionFilePath}. Refusing to overwrite current data. Recovery: inspect the primary registry and journal; ${restoreStep}, then delete the journal at ${this.pinGroupsTransactionFilePath} and restart the daemon.`,
-        );
+      if (!file.currentMatchesAfter && !this.rawFileImageMatches(file.current, file.before)) {
+        throw this.ambiguousTransactionStateError(phase, file, allFiles);
       }
     }
     for (const file of filesToReplay) {
@@ -1446,18 +1469,34 @@ export class FileBackedWorkspaceRegistry
     }
   }
 
+  private fileHasThirdState(file: PinGroupTransactionFileState): boolean {
+    return (
+      file.current.exists &&
+      !file.currentMatchesAfter &&
+      !this.rawFileImageMatches(file.current, file.before)
+    );
+  }
+
+  private ambiguousTransactionStateError(
+    phase: "prepared" | "committed",
+    conflictingFile: PinGroupTransactionFileState,
+    files: PinGroupTransactionFileState[],
+  ): WorkspaceRegistryIntegrityError {
+    const restoreSteps = files
+      .map((file) =>
+        file.before.exists
+          ? `restore ${file.filePath} to SHA-256 ${file.before.contentHash}`
+          : `delete ${file.filePath}`,
+      )
+      .join("; ");
+    return new WorkspaceRegistryIntegrityError(
+      `Workspace pin-group ${phase} transaction has an ambiguous ${conflictingFile.label} state at ${conflictingFile.filePath}. Journal retained at ${this.pinGroupsTransactionFilePath}; no recovery writes were made. Recover only as a complete snapshot using the before-images embedded in that journal: ${restoreSteps}. After all four files match that pre-transaction snapshot, delete ${this.pinGroupsTransactionFilePath} and restart the daemon.`,
+    );
+  }
+
   private async readPinGroupTransactionFileStates(
     transaction: PersistedWorkspacePinGroupsTransaction,
-  ): Promise<
-    Array<{
-      label: string;
-      filePath: string;
-      before: RawFileBeforeImage;
-      current: RawFileBeforeImage;
-      afterContents: string;
-      currentMatchesAfter: boolean;
-    }>
-  > {
+  ): Promise<PinGroupTransactionFileState[]> {
     const afterWorkspacesContents = serializeJsonFile(transaction.afterWorkspaces);
     const afterPinGroupsContents = serializeJsonFile(transaction.afterPinGroups);
     const inputs = [
@@ -1606,7 +1645,7 @@ export class FileBackedWorkspaceRegistry
       throw new Error("Workspace pin-group storage outcome is uncertain", { cause: error });
     }
     try {
-      await this.restorePinGroupTransactionBeforeState(transaction);
+      await this.recoverPreparedPinGroupTransaction(transaction);
     } catch {
       this.freezeMutationsUntilRestart();
       throw new Error("Workspace pin-group storage outcome is uncertain", { cause: error });
@@ -1631,7 +1670,7 @@ export class FileBackedWorkspaceRegistry
     }
     if (transaction.phase === "committed") return;
     try {
-      await this.restorePinGroupTransactionBeforeState(transaction);
+      await this.recoverPreparedPinGroupTransaction(transaction);
     } catch {
       this.freezeMutationsUntilRestart();
       throw new Error("Workspace pin-group storage outcome is uncertain", { cause: error });
