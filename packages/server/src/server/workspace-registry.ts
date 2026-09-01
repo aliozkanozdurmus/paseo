@@ -248,6 +248,25 @@ interface PinGroupTransactionFileState {
   currentMatchesAfter: boolean;
 }
 
+const RETRYABLE_PIN_GROUP_TRANSACTION_READ_ERRORS = new Set([
+  "EAGAIN",
+  "EBUSY",
+  "EMFILE",
+  "ENFILE",
+]);
+
+class UnsupportedWorkspacePinGroupFormatVersionError extends Error {
+  constructor(
+    public readonly component: "sidecar" | "transaction",
+    public readonly formatVersion: number,
+  ) {
+    super(
+      `Unsupported workspace pin-group ${component} formatVersion ${formatVersion}; this daemon supports ${WORKSPACE_PIN_GROUPS_FORMAT_VERSION}`,
+    );
+    this.name = "UnsupportedWorkspacePinGroupFormatVersionError";
+  }
+}
+
 function serializeJsonFile(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
@@ -264,9 +283,7 @@ function assertSupportedFormatVersion(value: unknown, component: "sidecar" | "tr
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
   const formatVersion = Reflect.get(value, "formatVersion");
   if (typeof formatVersion === "number" && formatVersion > WORKSPACE_PIN_GROUPS_FORMAT_VERSION) {
-    throw new Error(
-      `Unsupported workspace pin-group ${component} formatVersion ${formatVersion}; this daemon supports ${WORKSPACE_PIN_GROUPS_FORMAT_VERSION}`,
-    );
+    throw new UnsupportedWorkspacePinGroupFormatVersionError(component, formatVersion);
   }
 }
 
@@ -1356,9 +1373,10 @@ export class FileBackedWorkspaceRegistry
       const code = (error as NodeJS.ErrnoException).code;
       if (code === "ENOENT") return null;
       if (code === "EACCES" || code === "EPERM") {
-        throw this.pinGroupTransactionIntegrityError(error);
+        throw this.pinGroupTransactionPermissionError(error);
       }
-      throw error;
+      if (code && RETRYABLE_PIN_GROUP_TRANSACTION_READ_ERRORS.has(code)) throw error;
+      throw this.pinGroupTransactionFilesystemError(error);
     }
     try {
       const value: unknown = JSON.parse(raw);
@@ -1367,16 +1385,45 @@ export class FileBackedWorkspaceRegistry
       this.assertPinGroupTransactionIntegrity(transaction);
       return transaction;
     } catch (error) {
+      if (error instanceof UnsupportedWorkspacePinGroupFormatVersionError) {
+        throw this.pinGroupTransactionFutureVersionError(error);
+      }
       throw this.pinGroupTransactionIntegrityError(error);
     }
   }
 
+  private pinGroupTransactionFutureVersionError(
+    error: UnsupportedWorkspacePinGroupFormatVersionError,
+  ): WorkspaceRegistryIntegrityError {
+    return new WorkspaceRegistryIntegrityError(
+      `Workspace pin-group transaction journal at ${this.pinGroupsTransactionFilePath} uses formatVersion ${error.formatVersion}, which may contain valid state written by a newer daemon. Keep every file unchanged: ${this.registryFilePath}, ${this.pinGroupsFilePath}, ${this.pinGroupsBackupFilePath}, ${this.pinGroupsMarkerFilePath}, and ${this.pinGroupsTransactionFilePath}. Run a newer daemon version that understands this journal format, then restart recovery. Cause: ${error.message}`,
+    );
+  }
+
+  private pinGroupTransactionPermissionError(error: unknown): WorkspaceRegistryIntegrityError {
+    const cause = this.pinGroupTransactionErrorCause(error);
+    return new WorkspaceRegistryIntegrityError(
+      `Workspace pin-group transaction journal at ${this.pinGroupsTransactionFilePath} cannot be read because its filesystem permissions or ownership deny access. Leave the journal and snapshot files unchanged: ${this.registryFilePath}, ${this.pinGroupsFilePath}, ${this.pinGroupsBackupFilePath}, and ${this.pinGroupsMarkerFilePath}. Repair filesystem permissions or ownership on ${this.pinGroupsTransactionFilePath} so the daemon user can read it, then restart the daemon. Cause: ${cause}`,
+    );
+  }
+
+  private pinGroupTransactionFilesystemError(error: unknown): WorkspaceRegistryIntegrityError {
+    const cause = this.pinGroupTransactionErrorCause(error);
+    return new WorkspaceRegistryIntegrityError(
+      `Workspace pin-group transaction journal at ${this.pinGroupsTransactionFilePath} cannot be read because its filesystem state is invalid. Leave the journal and snapshot files unchanged: ${this.registryFilePath}, ${this.pinGroupsFilePath}, ${this.pinGroupsBackupFilePath}, and ${this.pinGroupsMarkerFilePath}. Inspect and repair the filesystem state at ${this.pinGroupsTransactionFilePath} so it is a readable journal file, then restart the daemon. Cause: ${cause}`,
+    );
+  }
+
   private pinGroupTransactionIntegrityError(error: unknown): WorkspaceRegistryIntegrityError {
-    const code = (error as NodeJS.ErrnoException).code;
-    const cause = `${code ? `${code}: ` : ""}${error instanceof Error ? error.message : String(error)}`;
+    const cause = this.pinGroupTransactionErrorCause(error);
     return new WorkspaceRegistryIntegrityError(
       `Workspace pin-group transaction journal at ${this.pinGroupsTransactionFilePath} is corrupt or unreadable. Journal retained; no recovery writes were made. Recover only as a complete snapshot: restore ${this.registryFilePath}, ${this.pinGroupsFilePath}, ${this.pinGroupsBackupFilePath}, and ${this.pinGroupsMarkerFilePath} from the same verified generation. After all four files match that snapshot, delete ${this.pinGroupsTransactionFilePath} and restart the daemon. Cause: ${cause}`,
     );
+  }
+
+  private pinGroupTransactionErrorCause(error: unknown): string {
+    const code = (error as NodeJS.ErrnoException).code;
+    return `${code ? `${code}: ` : ""}${error instanceof Error ? error.message : String(error)}`;
   }
 
   private assertPinGroupTransactionIntegrity(

@@ -9,6 +9,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -1014,6 +1015,17 @@ describe("workspace registries", () => {
 
   test("rejects a newer transaction format without touching registry bytes", async () => {
     const filePath = path.join(tmpDir, "projects", "future-journal-workspaces.json");
+    const sidecarPath = path.join(tmpDir, "projects", "future-journal-workspaces.pin-groups.json");
+    const backupPath = path.join(
+      tmpDir,
+      "projects",
+      "future-journal-workspaces.pin-groups.backup.json",
+    );
+    const markerPath = path.join(
+      tmpDir,
+      "projects",
+      "future-journal-workspaces.pin-groups.expected.json",
+    );
     const transactionPath = path.join(
       tmpDir,
       "projects",
@@ -1024,13 +1036,19 @@ describe("workspace registries", () => {
     const workspaceBytes = readFileSync(filePath, "utf8");
     const futureJournalBytes = JSON.stringify({ formatVersion: 2, futureRecovery: true });
     writeFileSync(transactionPath, futureJournalBytes);
+    const artifactPaths = [filePath, sidecarPath, backupPath, markerPath, transactionPath];
+    const untouched = snapshotFileBytes(artifactPaths);
 
     const reloaded = new FileBackedWorkspaceRegistry(filePath, logger);
     const failure = await reloaded.initialize().catch((cause: unknown) => cause);
     expect(failure).toBeInstanceOf(WorkspaceRegistryIntegrityError);
-    expect((failure as Error).message).toContain(
-      "Unsupported workspace pin-group transaction formatVersion 2",
-    );
+    const message = (failure as Error).message;
+    expect(message).toContain("valid state written by a newer daemon");
+    expect(message).toContain("Run a newer daemon version that understands this journal format");
+    expect(message).toContain("Keep every file unchanged");
+    expect(message).not.toContain("delete");
+    for (const artifactPath of artifactPaths) expect(message).toContain(artifactPath);
+    expectFileBytesUnchanged(untouched);
     expect(readFileSync(filePath, "utf8")).toBe(workspaceBytes);
     expect(readFileSync(transactionPath, "utf8")).toBe(futureJournalBytes);
   });
@@ -1064,7 +1082,24 @@ describe("workspace registries", () => {
     const transactionPath = path.join(projectsPath, "workspace-pin-groups.transaction.json");
     const registry = new FileBackedWorkspaceRegistry(filePath, logger);
     await registry.initialize();
-    writeFileSync(transactionPath, "UNREADABLE_TRANSACTION_JOURNAL");
+    const primaryBytes = readFileSync(filePath, "utf8");
+    const sidecarBytes = readFileSync(sidecarPath, "utf8");
+    const backupBytes = readFileSync(backupPath, "utf8");
+    const markerBytes = readFileSync(markerPath, "utf8");
+    writeFileSync(
+      transactionPath,
+      serializedJson(
+        pinGroupTransaction({
+          phase: "prepared",
+          beforeWorkspaces: primaryBytes,
+          afterWorkspaces: JSON.parse(primaryBytes),
+          beforePinGroups: sidecarBytes,
+          afterPinGroups: JSON.parse(sidecarBytes),
+          beforePinGroupsBackup: backupBytes,
+          beforeMarker: markerBytes,
+        }),
+      ),
+    );
     const artifactPaths = [filePath, sidecarPath, backupPath, markerPath, transactionPath];
     const untouched = snapshotFileBytes(artifactPaths);
     const permissionError = Object.assign(new Error("permission denied"), { code: "EACCES" });
@@ -1076,9 +1111,43 @@ describe("workspace registries", () => {
     });
     const failure = await reloaded.initialize().catch((cause: unknown) => cause);
 
-    expectJournalIntegrityRecovery(failure, transactionPath, artifactPaths.slice(0, 4));
-    expect((failure as Error).message).toContain("EACCES: permission denied");
+    expect(failure).toBeInstanceOf(WorkspaceRegistryIntegrityError);
+    const message = (failure as Error).message;
+    expect(message).toContain(transactionPath);
+    expect(message).toContain("Repair filesystem permissions or ownership");
+    expect(message).toContain("EACCES: permission denied");
+    expect(message).not.toContain("Recover only as a complete snapshot");
+    expect(message).not.toContain("delete");
+    for (const artifactPath of artifactPaths.slice(0, 4)) expect(message).toContain(artifactPath);
     expectFileBytesUnchanged(untouched);
+  });
+
+  test("blocks a transaction journal replaced by a directory", async () => {
+    const projectsPath = path.join(tmpDir, "projects");
+    const filePath = path.join(projectsPath, "workspaces.json");
+    const sidecarPath = path.join(projectsPath, "workspace-pin-groups.json");
+    const backupPath = path.join(projectsPath, "workspace-pin-groups.backup.json");
+    const markerPath = path.join(projectsPath, "workspace-pin-groups.expected.json");
+    const transactionPath = path.join(projectsPath, "workspace-pin-groups.transaction.json");
+    const registry = new FileBackedWorkspaceRegistry(filePath, logger);
+    await registry.initialize();
+    mkdirSync(transactionPath);
+    const artifactPaths = [filePath, sidecarPath, backupPath, markerPath];
+    const untouched = snapshotFileBytes(artifactPaths);
+
+    const reloaded = new FileBackedWorkspaceRegistry(filePath, logger);
+    const failure = await reloaded.initialize().catch((cause: unknown) => cause);
+
+    expect(failure).toBeInstanceOf(WorkspaceRegistryIntegrityError);
+    expect(failure).toBeInstanceOf(Error);
+    const message = (failure as Error).message;
+    expect(message).toContain(transactionPath);
+    expect(message).toContain("filesystem state is invalid");
+    expect(message).toContain("EISDIR");
+    expect(message).not.toContain("Recover only as a complete snapshot");
+    for (const artifactPath of artifactPaths) expect(message).toContain(artifactPath);
+    expectFileBytesUnchanged(untouched);
+    expect(statSync(transactionPath).isDirectory()).toBe(true);
   });
 
   test("keeps EAGAIN transaction reads on the ordinary retry path", async () => {
