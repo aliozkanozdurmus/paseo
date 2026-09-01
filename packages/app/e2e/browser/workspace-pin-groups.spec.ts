@@ -9,8 +9,8 @@ import { getServerId } from "../support/helpers/server-id";
 import { pinWorkspaceFromSidebar } from "../support/helpers/sidebar";
 
 const DEFAULT_GROUP_NAME = "Pinned";
-const SECOND_GROUP_NAME = "Focus";
-const RENAMED_GROUP_NAME = "Deep work";
+const SECOND_GROUP_NAME = "Deep work";
+const RENAMED_GROUP_NAME = "Focus";
 const ALPHA_WORKSPACE_NAME = "Alpha pinned workspace";
 const BETA_WORKSPACE_NAME = "Beta pinned workspace";
 const GROUP_NOT_FOUND_ERROR = "Pin group not found";
@@ -253,6 +253,11 @@ test.describe("Workspace pin groups", () => {
         await expectOnlyWorkspacePinned(page, beta, alpha);
       });
 
+      await test.step("keeps a failed rename visible and allows a successful retry", async () => {
+        await renameActivePinGroupWithRetry(page, RENAMED_GROUP_NAME);
+        expect(mutationGate.renameAttemptCount()).toBe(2);
+      });
+
       const defaultGroupId = await switchPinGroup(page, DEFAULT_GROUP_NAME);
       expect(defaultGroupId).toBe("default");
       await expectOnlyWorkspacePinned(page, alpha, beta);
@@ -262,7 +267,7 @@ test.describe("Workspace pin groups", () => {
         fullPage: true,
       });
 
-      const secondGroupId = await switchPinGroup(page, SECOND_GROUP_NAME);
+      const secondGroupId = await switchPinGroup(page, RENAMED_GROUP_NAME);
       await expectOnlyWorkspacePinned(page, beta, alpha);
 
       await page.reload();
@@ -274,11 +279,6 @@ test.describe("Workspace pin groups", () => {
       await page.screenshot({
         path: testInfo.outputPath("active-pin-group-after-reload.png"),
         fullPage: true,
-      });
-
-      await test.step("keeps a failed rename visible and allows a successful retry", async () => {
-        await renameActivePinGroupWithRetry(page, RENAMED_GROUP_NAME);
-        expect(mutationGate.renameAttemptCount()).toBe(2);
       });
 
       await test.step("captures the open switcher with both group choices", async () => {
