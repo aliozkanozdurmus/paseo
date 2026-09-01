@@ -157,6 +157,7 @@ export function normalizeWorkspaceDescriptor(
     name: payload.name,
     title: payload.title ?? null,
     pinnedAt: payload.pinnedAt ?? null,
+    // COMPAT(workspacePinGroups): added in v0.7.0, remove defaults after 2027-03-01.
     pinGroupId: payload.pinGroupId ?? null,
     pinGroupAssignedAt: payload.pinGroupAssignedAt ?? null,
     // COMPAT(workspaceLabels): old daemons omit assignments.

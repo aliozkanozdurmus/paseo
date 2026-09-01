@@ -6,7 +6,7 @@ import { addConnectedHostAndReload, waitForConnectedHost } from "../support/help
 import { startIsolatedHostDaemon } from "../support/helpers/isolated-host-daemon";
 import { seedWorkspace, type SeededWorkspace } from "../support/helpers/seed-client";
 import { getServerId } from "../support/helpers/server-id";
-import { pinWorkspaceFromSidebar } from "../support/helpers/sidebar";
+import { openMobileAgentSidebar, pinWorkspaceFromSidebar } from "../support/helpers/sidebar";
 
 const DEFAULT_GROUP_NAME = "Pinned";
 const SECOND_GROUP_NAME = "Deep work";
@@ -14,6 +14,7 @@ const RENAMED_GROUP_NAME = "Focus";
 const ALPHA_WORKSPACE_NAME = "Alpha pinned workspace";
 const BETA_WORKSPACE_NAME = "Beta pinned workspace";
 const GROUP_NOT_FOUND_ERROR = "Pin group not found";
+const DELETE_REJECTED_ERROR = "Pin group delete rejected";
 
 function workspaceRowTestId(workspaceId: string, serverId = getServerId()): string {
   return `sidebar-workspace-row-${serverId}:${workspaceId}`;
@@ -27,9 +28,30 @@ function pinnedSection(page: Page) {
   return page.getByTestId("sidebar-pinned-section");
 }
 
+function bottomSheetBackdrop(page: Page) {
+  return page.getByRole("button", { name: "Bottom sheet backdrop" }).first();
+}
+
 async function openPinGroupsMenu(page: Page): Promise<void> {
   await page.getByTestId("sidebar-pin-groups-menu-trigger").click();
-  await expect(page.getByTestId("sidebar-pin-groups-menu")).toBeVisible({ timeout: 10_000 });
+  await expect(
+    page.getByTestId("sidebar-pin-groups-menu").or(bottomSheetBackdrop(page)),
+  ).toBeVisible({ timeout: 10_000 });
+}
+
+async function expectPinGroupsMenuClosed(page: Page): Promise<void> {
+  await expect(page.getByTestId("sidebar-pin-groups-menu")).toHaveCount(0);
+  await expect(bottomSheetBackdrop(page)).not.toBeVisible({ timeout: 10_000 });
+}
+
+async function closePinGroupsMenu(page: Page): Promise<void> {
+  const backdrop = bottomSheetBackdrop(page);
+  if (await backdrop.isVisible()) {
+    await backdrop.click({ position: { x: 12, y: 12 } });
+  } else {
+    await page.keyboard.press("Escape");
+  }
+  await expectPinGroupsMenuClosed(page);
 }
 
 async function createPinGroup(page: Page, name: string): Promise<void> {
@@ -45,8 +67,7 @@ async function createPinGroup(page: Page, name: string): Promise<void> {
     timeout: 10_000,
   });
   await expect(input).toHaveCount(0);
-  await page.keyboard.press("Escape");
-  await expect(page.getByTestId("sidebar-pin-groups-menu")).toHaveCount(0);
+  await closePinGroupsMenu(page);
 }
 
 function pinGroupChoice(page: Page, name: string) {
@@ -64,7 +85,7 @@ async function switchPinGroup(page: Page, name: string): Promise<string> {
   if (!testId) throw new Error(`Pin group choice for ${name} has no data-testid`);
   await choice.click();
   await expect(page.getByTestId("sidebar-pin-groups-menu-trigger")).toContainText(name);
-  await expect(page.getByTestId("sidebar-pin-groups-menu")).toHaveCount(0);
+  await expectPinGroupsMenuClosed(page);
   return testId.replace("sidebar-pin-group-choice-", "");
 }
 
@@ -95,21 +116,24 @@ async function renameActivePinGroupWithRetry(page: Page, name: string): Promise<
     timeout: 10_000,
   });
   await expect(input).toHaveCount(0);
-  await page.keyboard.press("Escape");
-  await expect(page.getByTestId("sidebar-pin-groups-menu")).toHaveCount(0);
+  await closePinGroupsMenu(page);
 }
 
 async function deleteActivePinGroup(page: Page, name: string): Promise<void> {
   await openPinGroupsMenu(page);
-  const confirmationMessage = new Promise<string>((resolve) =>
+  const confirmationMessage = acceptNextDialog(page);
+
+  await page.getByTestId("sidebar-pin-group-delete").click();
+  await expect(confirmationMessage).resolves.toContain(name);
+}
+
+function acceptNextDialog(page: Page): Promise<string> {
+  return new Promise<string>((resolve) =>
     page.once("dialog", (dialog) => {
       resolve(dialog.message());
       void dialog.accept();
     }),
   );
-
-  await page.getByTestId("sidebar-pin-group-delete").click();
-  await expect(confirmationMessage).resolves.toContain(name);
 }
 
 async function hideExpoFastRefreshOverlay(page: Page): Promise<void> {
@@ -122,6 +146,7 @@ async function hideExpoFastRefreshOverlay(page: Page): Promise<void> {
 
 interface PinGroupMutationGate {
   renameAttemptCount(): number;
+  deleteAttemptCount(): number;
 }
 
 function readSessionMessage(
@@ -137,8 +162,12 @@ function readSessionMessage(
   }
 }
 
-async function installPinGroupMutationGate(page: Page): Promise<PinGroupMutationGate> {
+async function installPinGroupMutationGate(
+  page: Page,
+  input: { rejectFirstRename?: boolean; rejectFirstDelete?: boolean },
+): Promise<PinGroupMutationGate> {
   let renameAttempts = 0;
+  let deleteAttempts = 0;
 
   await page.routeWebSocket(daemonWsRoutePattern(), (ws) => {
     const server = ws.connectToServer();
@@ -150,7 +179,7 @@ async function installPinGroupMutationGate(page: Page): Promise<PinGroupMutation
         typeof request.requestId === "string"
       ) {
         renameAttempts += 1;
-        if (renameAttempts === 1) {
+        if (input.rejectFirstRename && renameAttempts === 1) {
           ws.send(
             JSON.stringify({
               type: "session",
@@ -165,6 +194,35 @@ async function installPinGroupMutationGate(page: Page): Promise<PinGroupMutation
               },
             }),
           );
+          return;
+        }
+      }
+      if (
+        request?.type === "workspace.pin_group.delete.request" &&
+        typeof request.requestId === "string"
+      ) {
+        deleteAttempts += 1;
+        if (input.rejectFirstDelete && deleteAttempts === 1) {
+          setTimeout(() => {
+            try {
+              ws.send(
+                JSON.stringify({
+                  type: "session",
+                  message: {
+                    type: "rpc_error",
+                    payload: {
+                      requestId: request.requestId,
+                      requestType: "workspace.pin_group.delete.request",
+                      error: DELETE_REJECTED_ERROR,
+                      code: "internal_error",
+                    },
+                  },
+                }),
+              );
+            } catch {
+              // client socket already closed
+            }
+          }, 500);
           return;
         }
       }
@@ -185,20 +243,47 @@ async function installPinGroupMutationGate(page: Page): Promise<PinGroupMutation
     });
   });
 
-  return { renameAttemptCount: () => renameAttempts };
+  return {
+    renameAttemptCount: () => renameAttempts,
+    deleteAttemptCount: () => deleteAttempts,
+  };
 }
 
 async function expectOnlyWorkspacePinned(
   page: Page,
   visible: SeededWorkspace,
   hidden: SeededWorkspace,
+  visibleServerId = getServerId(),
+  hiddenServerId = getServerId(),
 ): Promise<void> {
   const section = pinnedSection(page);
   await expect(section).toBeVisible({ timeout: 30_000 });
-  await expect(section.getByTestId(workspaceRowTestId(visible.workspaceId))).toBeVisible({
-    timeout: 10_000,
-  });
-  await expect(section.getByTestId(workspaceRowTestId(hidden.workspaceId))).toHaveCount(0);
+  await expect(
+    section.getByTestId(workspaceRowTestId(visible.workspaceId, visibleServerId)),
+  ).toBeVisible({ timeout: 10_000 });
+  await expect(
+    section.getByTestId(workspaceRowTestId(hidden.workspaceId, hiddenServerId)),
+  ).toHaveCount(0);
+}
+
+async function pinWorkspaceFromServerSidebar(
+  page: Page,
+  workspaceId: string,
+  serverId: string,
+): Promise<void> {
+  const key = `${serverId}:${workspaceId}`;
+  const row = page.getByTestId(`sidebar-workspace-row-${key}`);
+  await expect(row).toBeVisible({ timeout: 30_000 });
+  await row.hover();
+
+  const kebab = page.getByTestId(`sidebar-workspace-kebab-${key}`);
+  await expect(kebab).toBeVisible({ timeout: 10_000 });
+  await kebab.click();
+
+  const pinItem = page.getByTestId(`sidebar-workspace-menu-pin-${key}`);
+  await expect(pinItem).toBeVisible({ timeout: 10_000 });
+  await pinItem.click();
+  await expect(bottomSheetBackdrop(page)).not.toBeVisible({ timeout: 10_000 });
 }
 
 async function fetchWorkspaceDescriptor(workspace: SeededWorkspace) {
@@ -212,6 +297,13 @@ async function fetchWorkspaceDescriptor(workspace: SeededWorkspace) {
 async function fetchPinGroupId(workspace: SeededWorkspace): Promise<string | null> {
   const descriptor = await fetchWorkspaceDescriptor(workspace);
   return descriptor.pinGroupId ?? null;
+}
+
+async function expectPinGroupId(
+  workspace: SeededWorkspace,
+  expected: string | null,
+): Promise<void> {
+  await expect.poll(() => fetchPinGroupId(workspace), { timeout: 10_000 }).toBe(expected);
 }
 
 test.describe("Workspace pin groups", () => {
@@ -230,7 +322,7 @@ test.describe("Workspace pin groups", () => {
     });
 
     try {
-      const mutationGate = await installPinGroupMutationGate(page);
+      const mutationGate = await installPinGroupMutationGate(page, { rejectFirstRename: true });
       await gotoAppShell(page);
       await expect(workspaceRow(page, alpha.workspaceId)).toContainText(ALPHA_WORKSPACE_NAME, {
         timeout: 30_000,
@@ -291,7 +383,7 @@ test.describe("Workspace pin groups", () => {
           fullPage: true,
         });
         await pinGroupChoice(page, RENAMED_GROUP_NAME).click();
-        await expect(page.getByTestId("sidebar-pin-groups-menu")).toHaveCount(0);
+        await expectPinGroupsMenuClosed(page);
       });
 
       await test.step("deletes the group without archiving its workspace", async () => {
@@ -330,7 +422,9 @@ test.describe("Workspace pin groups", () => {
       await gotoAppShell(page);
       await expect(workspaceRow(page, primary.workspaceId)).toBeVisible({ timeout: 30_000 });
       await createPinGroup(page, "Primary only");
-      await switchPinGroup(page, DEFAULT_GROUP_NAME);
+      const primaryGroupId = await switchPinGroup(page, "Primary only");
+      await pinWorkspaceFromServerSidebar(page, primary.workspaceId, getServerId());
+      await expectPinGroupId(primary, primaryGroupId);
 
       await addConnectedHostAndReload(page, {
         serverId: secondaryDaemon.serverId,
@@ -348,10 +442,19 @@ test.describe("Workspace pin groups", () => {
       await openPinGroupSwitcher(page);
       await expect(pinGroupChoice(page, "Primary only")).toHaveCount(0);
       await pinGroupChoice(page, DEFAULT_GROUP_NAME).click();
-      await expect(page.getByTestId("sidebar-pin-groups-menu")).toHaveCount(0);
+      await expectPinGroupsMenuClosed(page);
 
       await createPinGroup(page, "Secondary only");
-      await switchPinGroup(page, DEFAULT_GROUP_NAME);
+      const secondaryGroupId = await switchPinGroup(page, "Secondary only");
+      await pinWorkspaceFromServerSidebar(page, secondary.workspaceId, secondaryDaemon.serverId);
+      await expectPinGroupId(secondary, secondaryGroupId);
+      await expectOnlyWorkspacePinned(
+        page,
+        secondary,
+        primary,
+        secondaryDaemon.serverId,
+        getServerId(),
+      );
 
       const primaryRow = workspaceRow(page, primary.workspaceId);
       await expect(primaryRow).toBeVisible({ timeout: 30_000 });
@@ -359,12 +462,109 @@ test.describe("Workspace pin groups", () => {
       await openPinGroupSwitcher(page);
       await expect(pinGroupChoice(page, "Primary only")).toHaveCount(1);
       await expect(pinGroupChoice(page, "Secondary only")).toHaveCount(0);
-      await pinGroupChoice(page, DEFAULT_GROUP_NAME).click();
-      await expect(page.getByTestId("sidebar-pin-groups-menu")).toHaveCount(0);
+      await pinGroupChoice(page, "Primary only").click();
+      await expectOnlyWorkspacePinned(
+        page,
+        primary,
+        secondary,
+        getServerId(),
+        secondaryDaemon.serverId,
+      );
+
+      await secondaryRow.click();
+      await switchPinGroup(page, "Secondary only");
+      await expectOnlyWorkspacePinned(
+        page,
+        secondary,
+        primary,
+        secondaryDaemon.serverId,
+        getServerId(),
+      );
     } finally {
       await secondary?.cleanup();
       await secondaryDaemon.close();
       await primary.cleanup();
+    }
+  });
+
+  test("renames and deletes a group through the compact bottom sheet", async ({ page }) => {
+    const workspace = await seedWorkspace({
+      repoPrefix: "pin-groups-compact-sheet-",
+      title: "Compact pin group workspace",
+    });
+
+    try {
+      await page.setViewportSize({ width: 390, height: 844 });
+      const mutationGate = await installPinGroupMutationGate(page, { rejectFirstDelete: true });
+      await gotoAppShell(page);
+      await openMobileAgentSidebar(page);
+      await expect(workspaceRow(page, workspace.workspaceId)).toBeVisible({ timeout: 30_000 });
+
+      await createPinGroup(page, "Compact group");
+      const groupId = await switchPinGroup(page, "Compact group");
+      await pinWorkspaceFromServerSidebar(page, workspace.workspaceId, getServerId());
+      await expectPinGroupId(workspace, groupId);
+
+      await test.step("renames through the sheet text field", async () => {
+        await openPinGroupsMenu(page);
+        await expect(
+          page.getByRole("button", { name: "Bottom sheet backdrop" }).first(),
+        ).toBeVisible();
+        await page.getByTestId("sidebar-pin-group-rename").click();
+
+        const input = page.getByTestId("sidebar-pin-group-rename-input");
+        await expect(input).toBeVisible();
+        await input.fill("Compact Focus");
+        await page.getByTestId("sidebar-pin-group-rename-submit").click();
+
+        await expect(page.getByTestId("sidebar-pin-groups-menu-trigger")).toContainText(
+          "Compact Focus",
+          { timeout: 10_000 },
+        );
+        await expect(input).toHaveCount(0);
+        await closePinGroupsMenu(page);
+      });
+
+      await test.step("keeps a rejected delete retryable and prevents duplicate requests", async () => {
+        await openPinGroupsMenu(page);
+        await expect(
+          page.getByRole("button", { name: "Bottom sheet backdrop" }).first(),
+        ).toBeVisible();
+        const confirmationMessage = acceptNextDialog(page);
+        const deleteItem = page.getByTestId("sidebar-pin-group-delete");
+        await deleteItem.click();
+        await expect(confirmationMessage).resolves.toContain("Compact Focus");
+        await expect(deleteItem).toBeDisabled();
+        await deleteItem.dispatchEvent("click");
+
+        await expect(page.getByTestId("app-toast-message")).toContainText(DELETE_REJECTED_ERROR, {
+          timeout: 10_000,
+        });
+        expect(mutationGate.deleteAttemptCount()).toBe(1);
+        await expect(deleteItem).toBeEnabled();
+        await expect(page.getByTestId("sidebar-pin-groups-menu-trigger")).toContainText(
+          "Compact Focus",
+        );
+        await expectPinGroupId(workspace, groupId);
+      });
+
+      await test.step("retries delete through the sheet and unpins the workspace", async () => {
+        const confirmationMessage = acceptNextDialog(page);
+        await page.getByTestId("sidebar-pin-group-delete").click();
+        await expect(confirmationMessage).resolves.toContain("Compact Focus");
+
+        await expect(page.getByTestId("sidebar-pin-groups-menu-trigger")).toContainText(
+          DEFAULT_GROUP_NAME,
+          { timeout: 10_000 },
+        );
+        expect(mutationGate.deleteAttemptCount()).toBe(2);
+        await expectPinGroupId(workspace, null);
+        const descriptor = await fetchWorkspaceDescriptor(workspace);
+        expect(descriptor.pinGroupId ?? null).toBeNull();
+        expect(descriptor.archivedAt ?? null).toBeNull();
+      });
+    } finally {
+      await workspace.cleanup();
     }
   });
 });

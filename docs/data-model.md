@@ -439,14 +439,25 @@ workspace together with its owning project.
 
 **Paths:** `$PASEO_HOME/projects/workspaces.json`,
 `$PASEO_HOME/projects/workspace-pin-groups.json`, and
-`$PASEO_HOME/projects/workspace-pin-groups.transaction.json`
+`$PASEO_HOME/projects/workspace-pin-groups.transaction.json`. The pin-group sidecar also has
+`workspace-pin-groups.backup.json` and `workspace-pin-groups.expected.json` siblings.
 
 `workspaces.json` remains an array of workspace records so a downgraded daemon can still read every
-workspace. The pin-group sidecar owns its catalog and memberships. Both files use validated atomic
-writes. A prepared transaction journal stores raw before-images and restores both files
-byte-for-byte after an interrupted compound write; the committed marker means both data files are
-durable and only cleanup remains. A malformed primary file or sidecar blocks initialization and
-remains byte-for-byte untouched. A workspace is a specific working directory within a project.
+workspace. The pin-group sidecar owns its catalog and memberships and records the SHA-256 hash of
+the primary bytes it was written with. A changed primary hash means a downgraded daemon wrote the
+array; the next upgrade accepts its workspace fields and reconciles `pinnedAt` as default-group
+membership before updating the sidecar projection. The mirrored sidecar restores one missing
+catalog copy. The expected marker makes losing both copies a startup error instead of an empty
+migration.
+
+The versioned transaction journal stores raw before-images and hashes for every file. Prepared
+recovery rolls back only files matching a known before- or after-image; any third state blocks
+startup so a downgrade write cannot be overwritten. Committed recovery validates and replays
+missing known after-images before deleting the journal. Unknown newer sidecar and journal format
+versions block startup without rewriting their bytes. These atomic rename and journal guarantees
+cover process crashes. They do not promise recovery from power loss because the atomic writer does
+not fsync file and directory entries. A malformed primary file or sidecar blocks initialization
+and remains byte-for-byte untouched. A workspace is a specific working directory within a project.
 
 | Field                          | Type                                            | Description                                                                                                                                                                                   |
 | ------------------------------ | ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -472,12 +483,13 @@ remains byte-for-byte untouched. A workspace is a specific working directory wit
 
 ### Workspace pin groups
 
-The sidecar stores `groups: [{ id, name, createdAt }]` and a workspace-keyed `memberships` object.
-Each membership contains one `groupId` and its ISO `assignedAt`, which is the ordering timestamp for
-that group. The daemon always owns the `default` group named `Pinned`; you cannot rename or delete
-it. Legacy records with `pinnedAt` join that group on initialization. The daemon continues writing
-`pinnedAt` only for default-group members so older builds can display those pins. Deleting another
-group removes its memberships without archiving its workspaces.
+The sidecar stores `formatVersion`, `primaryContentHash`, `groups: [{ id, name, createdAt }]`, and a
+workspace-keyed `memberships` object. Each membership contains one `groupId` and its ISO
+`assignedAt`, which is the ordering timestamp for that group. The daemon always owns the `default`
+group named `Pinned`; you cannot rename or delete it. Legacy records with `pinnedAt` join that group
+on initialization. The daemon continues writing `pinnedAt` only for default-group members so older
+builds can display those pins. Deleting another group removes its memberships without archiving its
+workspaces.
 
 ### Workspace label catalog
 

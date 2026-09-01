@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
@@ -116,28 +117,65 @@ const WorkspaceRegistryFileSchema = z.union([
   }),
 ]);
 
-const WorkspacePinGroupMembershipSchema = z.object({
-  groupId: z.string(),
-  assignedAt: z.string(),
-});
+const WorkspacePinGroupMembershipSchema = z
+  .object({
+    groupId: z.string(),
+    assignedAt: z.string(),
+  })
+  .strict();
 
-const WorkspacePinGroupsFileSchema = z.object({
-  groups: z.array(WorkspacePinGroupSchema),
-  memberships: z.record(z.string(), WorkspacePinGroupMembershipSchema),
-});
+const WORKSPACE_PIN_GROUPS_FORMAT_VERSION = 1;
+const WORKSPACE_PIN_GROUPS_MARKER_CONTENTS = `${JSON.stringify({
+  formatVersion: WORKSPACE_PIN_GROUPS_FORMAT_VERSION,
+})}\n`;
+const ContentHashSchema = z.string().regex(/^[a-f0-9]{64}$/);
+const PersistedWorkspacePinGroupSchema = z
+  .object({
+    id: z.string(),
+    name: z.string(),
+    createdAt: z.string(),
+  })
+  .strict();
+
+const LegacyWorkspacePinGroupsFileSchema = z
+  .object({
+    groups: z.array(PersistedWorkspacePinGroupSchema),
+    memberships: z.record(z.string(), WorkspacePinGroupMembershipSchema),
+  })
+  .strict();
+
+const WorkspacePinGroupsFileSchema = LegacyWorkspacePinGroupsFileSchema.extend({
+  formatVersion: z.literal(WORKSPACE_PIN_GROUPS_FORMAT_VERSION),
+  primaryContentHash: ContentHashSchema,
+}).strict();
 
 const RawFileBeforeImageSchema = z.discriminatedUnion("exists", [
-  z.object({ exists: z.literal(false) }),
-  z.object({ exists: z.literal(true), contents: z.string() }),
+  z.object({ exists: z.literal(false), contentHash: ContentHashSchema }).strict(),
+  z
+    .object({
+      exists: z.literal(true),
+      contents: z.string(),
+      contentHash: ContentHashSchema,
+    })
+    .strict(),
 ]);
 
-const WorkspacePinGroupsTransactionSchema = z.object({
-  phase: z.enum(["prepared", "committed"]),
-  beforeWorkspaces: RawFileBeforeImageSchema,
-  afterWorkspaces: z.array(PersistedWorkspaceRecordSchema),
-  beforePinGroups: RawFileBeforeImageSchema,
-  afterPinGroups: WorkspacePinGroupsFileSchema,
-});
+const WorkspacePinGroupsTransactionSchema = z
+  .object({
+    formatVersion: z.literal(WORKSPACE_PIN_GROUPS_FORMAT_VERSION),
+    phase: z.enum(["prepared", "committed"]),
+    beforeWorkspaces: RawFileBeforeImageSchema,
+    afterWorkspaces: z.array(z.unknown()),
+    afterWorkspacesContentHash: ContentHashSchema,
+    beforePinGroups: RawFileBeforeImageSchema,
+    afterPinGroups: WorkspacePinGroupsFileSchema,
+    afterPinGroupsContentHash: ContentHashSchema,
+    beforePinGroupsBackup: RawFileBeforeImageSchema,
+    afterPinGroupsBackupContentHash: ContentHashSchema,
+    beforeMarker: RawFileBeforeImageSchema,
+    afterMarkerContentHash: ContentHashSchema,
+  })
+  .strict();
 
 export const DEFAULT_WORKSPACE_PIN_GROUP_ID = "default";
 export const DEFAULT_WORKSPACE_PIN_GROUP_NAME = "Pinned";
@@ -194,6 +232,28 @@ export type PersistedWorkspacePinGroupsFile = z.infer<typeof WorkspacePinGroupsF
 type RawFileBeforeImage = z.infer<typeof RawFileBeforeImageSchema>;
 type PersistedWorkspacePinGroupsTransaction = z.infer<typeof WorkspacePinGroupsTransactionSchema>;
 
+function serializeJsonFile(value: unknown): string {
+  return JSON.stringify(value, null, 2);
+}
+
+function contentHash(contents: string): string {
+  return createHash("sha256").update(contents).digest("hex");
+}
+
+function missingFileHash(): string {
+  return contentHash("workspace-pin-groups:file-missing");
+}
+
+function assertSupportedFormatVersion(value: unknown, component: "sidecar" | "transaction"): void {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return;
+  const formatVersion = Reflect.get(value, "formatVersion");
+  if (typeof formatVersion === "number" && formatVersion > WORKSPACE_PIN_GROUPS_FORMAT_VERSION) {
+    throw new Error(
+      `Unsupported workspace pin-group ${component} formatVersion ${formatVersion}; this daemon supports ${WORKSPACE_PIN_GROUPS_FORMAT_VERSION}`,
+    );
+  }
+}
+
 function pinGroupTransactionDataEqual(
   left: PersistedWorkspacePinGroupsTransaction,
   right: PersistedWorkspacePinGroupsTransaction,
@@ -207,6 +267,7 @@ function pinGroupTransactionDataEqual(
 interface WorkspaceRegistryPersistenceState {
   pinGroups: Map<string, WorkspacePinGroup>;
   persistedPinGroupsFile: PersistedWorkspacePinGroupsFile | null;
+  pinGroupsStorageNeedsUpgrade: boolean;
   legacyEnvelope: {
     pinGroups: WorkspacePinGroup[];
   } | null;
@@ -670,6 +731,16 @@ function resolvePinGroupsTransactionFilePath(pinGroupsFilePath: string): string 
   return path.join(parsed.dir, `${parsed.name}.transaction${parsed.ext || ".json"}`);
 }
 
+function resolvePinGroupsBackupFilePath(pinGroupsFilePath: string): string {
+  const parsed = path.parse(pinGroupsFilePath);
+  return path.join(parsed.dir, `${parsed.name}.backup${parsed.ext || ".json"}`);
+}
+
+function resolvePinGroupsMarkerFilePath(pinGroupsFilePath: string): string {
+  const parsed = path.parse(pinGroupsFilePath);
+  return path.join(parsed.dir, `${parsed.name}.expected${parsed.ext || ".json"}`);
+}
+
 function sortPinGroups(groups: Iterable<WorkspacePinGroup>): WorkspacePinGroup[] {
   return Array.from(groups).sort((left, right) => {
     if (left.id === DEFAULT_WORKSPACE_PIN_GROUP_ID) return -1;
@@ -726,6 +797,25 @@ function buildInitialMemberships(input: {
   return memberships;
 }
 
+function reconcileDefaultMembershipsFromPrimary(
+  memberships: Record<string, PersistedWorkspacePinGroupMembership>,
+  workspaces: readonly PersistedWorkspaceRecord[],
+): void {
+  for (const workspace of workspaces) {
+    const stored = memberships[workspace.workspaceId];
+    if (workspace.pinnedAt) {
+      memberships[workspace.workspaceId] = {
+        groupId: DEFAULT_WORKSPACE_PIN_GROUP_ID,
+        assignedAt: workspace.pinnedAt,
+      };
+      continue;
+    }
+    if (stored?.groupId === DEFAULT_WORKSPACE_PIN_GROUP_ID) {
+      delete memberships[workspace.workspaceId];
+    }
+  }
+}
+
 function workspacesWithMemberships(
   workspaces: readonly PersistedWorkspaceRecord[],
   memberships: Readonly<Record<string, PersistedWorkspacePinGroupMembership>>,
@@ -743,6 +833,7 @@ function workspacesWithMemberships(
 function buildPinGroupsFile(
   workspaces: readonly PersistedWorkspaceRecord[],
   pinGroups: ReadonlyMap<string, WorkspacePinGroup>,
+  primaryContentHash: string,
 ): PersistedWorkspacePinGroupsFile {
   const memberships = Object.fromEntries(
     workspaces
@@ -761,6 +852,8 @@ function buildPinGroupsFile(
       .sort(([left], [right]) => left.localeCompare(right)),
   );
   return WorkspacePinGroupsFileSchema.parse({
+    formatVersion: WORKSPACE_PIN_GROUPS_FORMAT_VERSION,
+    primaryContentHash,
     groups: sortPinGroups(pinGroups.values()),
     memberships,
   });
@@ -772,12 +865,20 @@ function pinGroupFilesEqual(
 ): boolean {
   if (!left) return false;
   const canonicalLeft = WorkspacePinGroupsFileSchema.parse({
+    formatVersion: left.formatVersion,
+    primaryContentHash: left.primaryContentHash,
     groups: sortPinGroups(left.groups),
     memberships: Object.fromEntries(
       Object.entries(left.memberships).sort(([leftId], [rightId]) => leftId.localeCompare(rightId)),
     ),
   });
   return JSON.stringify(canonicalLeft) === JSON.stringify(right);
+}
+
+interface LoadedPinGroupsStorage {
+  file: PersistedWorkspacePinGroupsFile | null;
+  needsPersistence: boolean;
+  primaryContentHashMatches: boolean;
 }
 
 function toLegacyWorkspaceRecord(workspace: PersistedWorkspaceRecord): PersistedWorkspaceRecord {
@@ -791,6 +892,8 @@ export class FileBackedWorkspaceRegistry
 {
   private readonly registryFilePath: string;
   private readonly pinGroupsFilePath: string;
+  private readonly pinGroupsBackupFilePath: string;
+  private readonly pinGroupsMarkerFilePath: string;
   private readonly pinGroupsTransactionFilePath: string;
   private readonly pinGroupIdFactory: () => string;
   private readonly now: () => string;
@@ -841,6 +944,7 @@ export class FileBackedWorkspaceRegistry
     const persistenceState: WorkspaceRegistryPersistenceState = {
       pinGroups: new Map(),
       persistedPinGroupsFile: null,
+      pinGroupsStorageNeedsUpgrade: false,
       legacyEnvelope: null,
       workspaceFileWasEnvelope: false,
     };
@@ -867,6 +971,8 @@ export class FileBackedWorkspaceRegistry
     });
     this.registryFilePath = filePath;
     this.pinGroupsFilePath = options?.pinGroupsFilePath ?? resolvePinGroupsFilePath(filePath);
+    this.pinGroupsBackupFilePath = resolvePinGroupsBackupFilePath(this.pinGroupsFilePath);
+    this.pinGroupsMarkerFilePath = resolvePinGroupsMarkerFilePath(this.pinGroupsFilePath);
     this.pinGroupsTransactionFilePath =
       options?.pinGroupsTransactionFilePath ??
       resolvePinGroupsTransactionFilePath(this.pinGroupsFilePath);
@@ -1043,9 +1149,12 @@ export class FileBackedWorkspaceRegistry
 
   private async loadPinGroupState(): Promise<void> {
     await this.recoverPinGroupTransaction();
+    const primaryBeforeLoad = await this.readRawFileBeforeImage(this.registryFilePath);
+    const primaryContentHash = primaryBeforeLoad.contentHash;
     await super.initialize();
     const workspaces = await super.list();
-    const storedPinGroups = await this.readPinGroupsFile();
+    const loadedStorage = await this.readPinGroupsStorage(primaryContentHash);
+    const storedPinGroups = loadedStorage.file;
     const pinGroups = buildInitialPinGroups({
       storedPinGroups,
       legacyEnvelope: this.persistenceState.legacyEnvelope,
@@ -1054,12 +1163,19 @@ export class FileBackedWorkspaceRegistry
     });
     this.persistenceState.pinGroups = pinGroups;
     this.persistenceState.persistedPinGroupsFile = storedPinGroups;
+    this.persistenceState.pinGroupsStorageNeedsUpgrade = loadedStorage.needsPersistence;
 
     const memberships = buildInitialMemberships({
       storedPinGroups,
       workspaces,
       pinGroups,
     });
+    if (storedPinGroups && !loadedStorage.primaryContentHashMatches) {
+      // COMPAT(workspacePinGroups): a downgraded daemon can only edit default-group
+      // membership through pinnedAt. Preserve custom memberships while accepting every
+      // primary-record field and default-pin change from that newer primary generation.
+      reconcileDefaultMembershipsFromPrimary(memberships, workspaces);
+    }
     const normalizedWorkspaces = workspacesWithMemberships(workspaces, memberships).map(
       (workspace) => normalizeWorkspacePinMembership(workspace, pinGroups),
     );
@@ -1068,12 +1184,17 @@ export class FileBackedWorkspaceRegistry
     );
     const pinGroupsFileChanged = !pinGroupFilesEqual(
       storedPinGroups,
-      buildPinGroupsFile(normalizedWorkspaces, pinGroups),
+      buildPinGroupsFile(
+        normalizedWorkspaces,
+        pinGroups,
+        contentHash(serializeJsonFile(normalizedWorkspaces.map(toLegacyWorkspaceRecord))),
+      ),
     );
     const needsPersistence =
       this.persistenceState.workspaceFileWasEnvelope ||
       workspaceProjectionChanged ||
-      pinGroupsFileChanged;
+      pinGroupsFileChanged ||
+      loadedStorage.needsPersistence;
     if (needsPersistence) {
       await this.mutateCache(
         (records) => {
@@ -1092,15 +1213,101 @@ export class FileBackedWorkspaceRegistry
     this.initialized = true;
   }
 
-  private async readPinGroupsFile(): Promise<PersistedWorkspacePinGroupsFile | null> {
+  private parsePinGroupsFile(
+    raw: string,
+    primaryContentHash: string,
+  ): { file: PersistedWorkspacePinGroupsFile; legacy: boolean } {
+    const value: unknown = JSON.parse(raw);
+    assertSupportedFormatVersion(value, "sidecar");
+    if (
+      value &&
+      typeof value === "object" &&
+      !Array.isArray(value) &&
+      Reflect.get(value, "formatVersion") === undefined
+    ) {
+      const legacy = LegacyWorkspacePinGroupsFileSchema.parse(value);
+      return {
+        file: WorkspacePinGroupsFileSchema.parse({
+          ...legacy,
+          formatVersion: WORKSPACE_PIN_GROUPS_FORMAT_VERSION,
+          primaryContentHash,
+        }),
+        legacy: true,
+      };
+    }
+    return { file: WorkspacePinGroupsFileSchema.parse(value), legacy: false };
+  }
+
+  private async readOptionalRawFile(filePath: string): Promise<string | null> {
     try {
-      const raw = await fs.readFile(this.pinGroupsFilePath, "utf8");
-      return WorkspacePinGroupsFileSchema.parse(JSON.parse(raw));
+      return await fs.readFile(filePath, "utf8");
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    }
+  }
+
+  private async readPinGroupsStorage(primaryContentHash: string): Promise<LoadedPinGroupsStorage> {
+    const sidecarRaw = await this.readOptionalRawFile(this.pinGroupsFilePath);
+    const backupRaw = await this.readOptionalRawFile(this.pinGroupsBackupFilePath);
+    const markerRaw = await this.readOptionalRawFile(this.pinGroupsMarkerFilePath);
+    if (markerRaw !== null && markerRaw !== WORKSPACE_PIN_GROUPS_MARKER_CONTENTS) {
+      throw new Error(
+        `Invalid workspace pin-group storage marker at ${this.pinGroupsMarkerFilePath}`,
+      );
+    }
+    if (!sidecarRaw && !backupRaw) {
+      if (markerRaw !== null) {
+        throw new Error(
+          `Workspace pin-group sidecar and backup are missing; restore ${this.pinGroupsFilePath} or ${this.pinGroupsBackupFilePath} from backup`,
+        );
+      }
+      return { file: null, needsPersistence: true, primaryContentHashMatches: false };
+    }
+
+    try {
+      if (!sidecarRaw && backupRaw) {
+        const backup = this.parsePinGroupsFile(backupRaw, primaryContentHash);
+        await this.writeRawFile(this.pinGroupsFilePath, backupRaw);
+        return {
+          file: backup.file,
+          needsPersistence: backup.legacy || markerRaw === null,
+          primaryContentHashMatches:
+            !backup.legacy && backup.file.primaryContentHash === primaryContentHash,
+        };
+      }
+
+      const sidecar = this.parsePinGroupsFile(sidecarRaw!, primaryContentHash);
+      if (!backupRaw) {
+        return {
+          file: sidecar.file,
+          needsPersistence: true,
+          primaryContentHashMatches:
+            !sidecar.legacy && sidecar.file.primaryContentHash === primaryContentHash,
+        };
+      }
+      const backup = this.parsePinGroupsFile(backupRaw, primaryContentHash);
+      if (
+        !sidecar.legacy &&
+        !backup.legacy &&
+        serializeJsonFile(sidecar.file) !== serializeJsonFile(backup.file)
+      ) {
+        throw new Error("Workspace pin-group sidecar and backup disagree; refusing to choose one");
+      }
+      return {
+        file: sidecar.file,
+        needsPersistence: sidecar.legacy || backup.legacy || markerRaw === null,
+        primaryContentHashMatches:
+          !sidecar.legacy && sidecar.file.primaryContentHash === primaryContentHash,
+      };
+    } catch (error) {
       this.logger.error(
-        { err: error, filePath: this.pinGroupsFilePath },
-        "Failed to load workspace pin groups file",
+        {
+          err: error,
+          filePath: this.pinGroupsFilePath,
+          backupFilePath: this.pinGroupsBackupFilePath,
+        },
+        "Failed to load workspace pin groups storage",
       );
       throw error;
     }
@@ -1109,10 +1316,43 @@ export class FileBackedWorkspaceRegistry
   private async readPinGroupTransaction(): Promise<PersistedWorkspacePinGroupsTransaction | null> {
     try {
       const raw = await fs.readFile(this.pinGroupsTransactionFilePath, "utf8");
-      return WorkspacePinGroupsTransactionSchema.parse(JSON.parse(raw));
+      const value: unknown = JSON.parse(raw);
+      assertSupportedFormatVersion(value, "transaction");
+      const transaction = WorkspacePinGroupsTransactionSchema.parse(value);
+      this.assertPinGroupTransactionIntegrity(transaction);
+      return transaction;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
       throw error;
+    }
+  }
+
+  private assertPinGroupTransactionIntegrity(
+    transaction: PersistedWorkspacePinGroupsTransaction,
+  ): void {
+    const images = [
+      transaction.beforeWorkspaces,
+      transaction.beforePinGroups,
+      transaction.beforePinGroupsBackup,
+      transaction.beforeMarker,
+    ];
+    for (const image of images) {
+      const expected = image.exists ? contentHash(image.contents) : missingFileHash();
+      if (image.contentHash !== expected) {
+        throw new Error("Workspace pin-group transaction contains an invalid before-image hash");
+      }
+    }
+    const afterWorkspacesContents = serializeJsonFile(transaction.afterWorkspaces);
+    const afterPinGroupsContents = serializeJsonFile(transaction.afterPinGroups);
+    WorkspaceRegistryFileSchema.parse(transaction.afterWorkspaces);
+    if (
+      transaction.afterWorkspacesContentHash !== contentHash(afterWorkspacesContents) ||
+      transaction.afterPinGroups.primaryContentHash !== transaction.afterWorkspacesContentHash ||
+      transaction.afterPinGroupsContentHash !== contentHash(afterPinGroupsContents) ||
+      transaction.afterPinGroupsBackupContentHash !== transaction.afterPinGroupsContentHash ||
+      transaction.afterMarkerContentHash !== contentHash(WORKSPACE_PIN_GROUPS_MARKER_CONTENTS)
+    ) {
+      throw new Error("Workspace pin-group transaction contains an invalid after-image hash");
     }
   }
 
@@ -1123,22 +1363,122 @@ export class FileBackedWorkspaceRegistry
       await this.restorePinGroupTransactionBeforeState(transaction);
       return;
     }
+    await this.replayCommittedPinGroupTransaction(transaction);
     await fs.rm(this.pinGroupsTransactionFilePath, { force: true }).catch(() => undefined);
   }
 
   private async restorePinGroupTransactionBeforeState(
     transaction: PersistedWorkspacePinGroupsTransaction,
   ): Promise<void> {
-    await this.restoreRawFileBeforeImage(this.pinGroupsFilePath, transaction.beforePinGroups);
-    await this.restoreRawFileBeforeImage(this.registryFilePath, transaction.beforeWorkspaces);
+    const files = await this.readPinGroupTransactionFileStates(transaction);
+    for (const file of files) {
+      if (!this.rawFileImageMatches(file.current, file.before) && !file.currentMatchesAfter) {
+        throw new Error(
+          `Workspace pin-group prepared transaction conflicts with a newer ${file.label} file; refusing to overwrite it`,
+        );
+      }
+    }
+    for (const file of files) {
+      if (!this.rawFileImageMatches(file.current, file.before)) {
+        await this.restoreRawFileBeforeImage(file.filePath, file.before);
+      }
+    }
     await fs.rm(this.pinGroupsTransactionFilePath, { force: true });
+  }
+
+  private async replayCommittedPinGroupTransaction(
+    transaction: PersistedWorkspacePinGroupsTransaction,
+  ): Promise<void> {
+    const files = await this.readPinGroupTransactionFileStates(transaction);
+    for (const file of files) {
+      if (
+        file.current.exists &&
+        !file.currentMatchesAfter &&
+        !this.rawFileImageMatches(file.current, file.before)
+      ) {
+        throw new Error(
+          `Workspace pin-group committed transaction conflicts with a newer ${file.label} file; refusing to overwrite it`,
+        );
+      }
+    }
+    for (const file of files) {
+      if (!file.currentMatchesAfter) {
+        await this.writeRawFile(file.filePath, file.afterContents);
+      }
+    }
+  }
+
+  private async readPinGroupTransactionFileStates(
+    transaction: PersistedWorkspacePinGroupsTransaction,
+  ): Promise<
+    Array<{
+      label: string;
+      filePath: string;
+      before: RawFileBeforeImage;
+      current: RawFileBeforeImage;
+      afterContents: string;
+      currentMatchesAfter: boolean;
+    }>
+  > {
+    const afterWorkspacesContents = serializeJsonFile(transaction.afterWorkspaces);
+    const afterPinGroupsContents = serializeJsonFile(transaction.afterPinGroups);
+    const inputs = [
+      {
+        label: "workspace registry",
+        filePath: this.registryFilePath,
+        before: transaction.beforeWorkspaces,
+        afterContents: afterWorkspacesContents,
+        afterHash: transaction.afterWorkspacesContentHash,
+      },
+      {
+        label: "pin-group sidecar",
+        filePath: this.pinGroupsFilePath,
+        before: transaction.beforePinGroups,
+        afterContents: afterPinGroupsContents,
+        afterHash: transaction.afterPinGroupsContentHash,
+      },
+      {
+        label: "pin-group backup",
+        filePath: this.pinGroupsBackupFilePath,
+        before: transaction.beforePinGroupsBackup,
+        afterContents: afterPinGroupsContents,
+        afterHash: transaction.afterPinGroupsBackupContentHash,
+      },
+      {
+        label: "pin-group storage marker",
+        filePath: this.pinGroupsMarkerFilePath,
+        before: transaction.beforeMarker,
+        afterContents: WORKSPACE_PIN_GROUPS_MARKER_CONTENTS,
+        afterHash: transaction.afterMarkerContentHash,
+      },
+    ];
+    return Promise.all(
+      inputs.map(async (input) => {
+        const current = await this.readRawFileBeforeImage(input.filePath);
+        return {
+          label: input.label,
+          filePath: input.filePath,
+          before: input.before,
+          afterContents: input.afterContents,
+          current,
+          currentMatchesAfter: current.exists && current.contentHash === input.afterHash,
+        };
+      }),
+    );
+  }
+
+  private rawFileImageMatches(current: RawFileBeforeImage, expected: RawFileBeforeImage): boolean {
+    return current.exists === expected.exists && current.contentHash === expected.contentHash;
   }
 
   private async readRawFileBeforeImage(filePath: string): Promise<RawFileBeforeImage> {
     try {
-      return { exists: true, contents: await fs.readFile(filePath, "utf8") };
+      const contents = await fs.readFile(filePath, "utf8");
+      return { exists: true, contents, contentHash: contentHash(contents) };
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return { exists: false };
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        return { exists: false, contentHash: missingFileHash() };
+      }
       throw error;
     }
   }
@@ -1158,21 +1498,31 @@ export class FileBackedWorkspaceRegistry
     records: readonly PersistedWorkspaceRecord[],
     pinGroups: ReadonlyMap<string, WorkspacePinGroup>,
   ): Promise<void> {
-    const pinGroupsFile = buildPinGroupsFile(records, pinGroups);
-    const sidecarChanged = !pinGroupFilesEqual(
-      this.persistenceState.persistedPinGroupsFile,
-      pinGroupsFile,
-    );
     const workspaceFile = records.map(toLegacyWorkspaceRecord);
+    const afterWorkspacesContents = serializeJsonFile(workspaceFile);
+    const afterWorkspacesContentHash = contentHash(afterWorkspacesContents);
+    const pinGroupsFile = buildPinGroupsFile(records, pinGroups, afterWorkspacesContentHash);
+    const afterPinGroupsContents = serializeJsonFile(pinGroupsFile);
+    const afterPinGroupsContentHash = contentHash(afterPinGroupsContents);
+    const sidecarChanged =
+      !pinGroupFilesEqual(this.persistenceState.persistedPinGroupsFile, pinGroupsFile) ||
+      this.persistenceState.pinGroupsStorageNeedsUpgrade;
     if (!sidecarChanged) {
       await this.writeWorkspaceRecords(this.registryFilePath, workspaceFile);
     } else {
       const transaction = WorkspacePinGroupsTransactionSchema.parse({
+        formatVersion: WORKSPACE_PIN_GROUPS_FORMAT_VERSION,
         phase: "prepared",
         beforeWorkspaces: await this.readRawFileBeforeImage(this.registryFilePath),
         afterWorkspaces: workspaceFile,
+        afterWorkspacesContentHash,
         beforePinGroups: await this.readRawFileBeforeImage(this.pinGroupsFilePath),
         afterPinGroups: pinGroupsFile,
+        afterPinGroupsContentHash,
+        beforePinGroupsBackup: await this.readRawFileBeforeImage(this.pinGroupsBackupFilePath),
+        afterPinGroupsBackupContentHash: afterPinGroupsContentHash,
+        beforeMarker: await this.readRawFileBeforeImage(this.pinGroupsMarkerFilePath),
+        afterMarkerContentHash: contentHash(WORKSPACE_PIN_GROUPS_MARKER_CONTENTS),
       });
       try {
         await this.writePinGroupsTransaction(this.pinGroupsTransactionFilePath, transaction);
@@ -1181,6 +1531,8 @@ export class FileBackedWorkspaceRegistry
       }
       try {
         await this.writePinGroupsFile(this.pinGroupsFilePath, pinGroupsFile);
+        await this.writePinGroupsFile(this.pinGroupsBackupFilePath, pinGroupsFile);
+        await writeFileAtomic(this.pinGroupsMarkerFilePath, WORKSPACE_PIN_GROUPS_MARKER_CONTENTS);
         await this.writeWorkspaceRecords(this.registryFilePath, workspaceFile);
         await this.writePinGroupsTransaction(this.pinGroupsTransactionFilePath, {
           ...transaction,
@@ -1192,6 +1544,7 @@ export class FileBackedWorkspaceRegistry
       await fs.rm(this.pinGroupsTransactionFilePath, { force: true }).catch(() => undefined);
     }
     this.persistenceState.persistedPinGroupsFile = pinGroupsFile;
+    this.persistenceState.pinGroupsStorageNeedsUpgrade = false;
     this.persistenceState.pinGroups = new Map(pinGroups);
   }
 

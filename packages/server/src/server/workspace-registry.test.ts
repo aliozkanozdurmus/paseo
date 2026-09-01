@@ -1,5 +1,8 @@
 import os from "node:os";
 import path from "node:path";
+import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
+import { createRequire } from "node:module";
 import {
   existsSync,
   mkdirSync,
@@ -11,7 +14,6 @@ import {
 } from "node:fs";
 
 import { beforeEach, afterEach, describe, expect, test } from "vitest";
-import { z } from "zod";
 
 import { createTestLogger } from "../test-utils/test-logger.js";
 import { writeJsonFileAtomic } from "./atomic-file.js";
@@ -24,6 +26,104 @@ import {
   resolveWorkspaceDisplayName,
   resolveWorkspaceName,
 } from "./workspace-registry.js";
+
+function serializedJson(value: unknown): string {
+  return JSON.stringify(value, null, 2);
+}
+
+function fileHash(contents: string): string {
+  return createHash("sha256").update(contents).digest("hex");
+}
+
+function missingHash(): string {
+  return fileHash("workspace-pin-groups:file-missing");
+}
+
+function beforeImage(contents: string | null) {
+  return contents === null
+    ? { exists: false as const, contentHash: missingHash() }
+    : { exists: true as const, contents, contentHash: fileHash(contents) };
+}
+
+function pinGroupTransaction(input: {
+  phase: "prepared" | "committed";
+  beforeWorkspaces: string | null;
+  afterWorkspaces: unknown[];
+  beforePinGroups: string | null;
+  afterPinGroups: Record<string, unknown>;
+  beforePinGroupsBackup: string | null;
+  beforeMarker?: string | null;
+}) {
+  const afterWorkspacesContents = serializedJson(input.afterWorkspaces);
+  const afterPinGroupsContents = serializedJson(input.afterPinGroups);
+  return {
+    formatVersion: 1,
+    phase: input.phase,
+    beforeWorkspaces: beforeImage(input.beforeWorkspaces),
+    afterWorkspaces: input.afterWorkspaces,
+    afterWorkspacesContentHash: fileHash(afterWorkspacesContents),
+    beforePinGroups: beforeImage(input.beforePinGroups),
+    afterPinGroups: input.afterPinGroups,
+    afterPinGroupsContentHash: fileHash(afterPinGroupsContents),
+    beforePinGroupsBackup: beforeImage(input.beforePinGroupsBackup),
+    afterPinGroupsBackupContentHash: fileHash(afterPinGroupsContents),
+    beforeMarker: beforeImage(input.beforeMarker ?? null),
+    afterMarkerContentHash: fileHash(`${JSON.stringify({ formatVersion: 1 })}\n`),
+  };
+}
+
+function runBaselineWorkspaceUpdate(input: {
+  sandboxRoot: string;
+  workspaceFilePath: string;
+}): void {
+  const repoRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+    encoding: "utf8",
+  }).trim();
+  const baselineRoot = path.join(input.sandboxRoot, "ecec33265");
+  const baselineFiles = [
+    "packages/server/src/server/workspace-registry.ts",
+    "packages/server/src/server/workspace-registry-model.ts",
+    "packages/server/src/server/atomic-file.ts",
+    "packages/server/src/utils/path.ts",
+  ];
+  for (const relativePath of baselineFiles) {
+    const targetPath = path.join(baselineRoot, relativePath);
+    mkdirSync(path.dirname(targetPath), { recursive: true });
+    writeFileSync(
+      targetPath,
+      execFileSync("git", ["show", `ecec33265:${relativePath}`], { encoding: "utf8" }),
+    );
+  }
+  symlinkSync(
+    path.join(repoRoot, "node_modules"),
+    path.join(baselineRoot, "node_modules"),
+    process.platform === "win32" ? "junction" : "dir",
+  );
+  const runnerPath = path.join(baselineRoot, "mutate-workspace.ts");
+  writeFileSync(
+    runnerPath,
+    `import { FileBackedWorkspaceRegistry } from "./packages/server/src/server/workspace-registry.ts";
+const logger: any = { child() { return this; }, error() {} };
+void (async () => {
+  const registry = new FileBackedWorkspaceRegistry(process.argv[2]!, logger);
+  await registry.initialize();
+  const updated = await registry.update("ws-survives-downgrade", (workspace) => ({
+    ...workspace,
+    displayName: "renamed by ecec33265",
+    title: "Legacy title",
+    pinnedAt: null,
+    updatedAt: "2026-08-31T14:00:00.000Z",
+  }));
+  if (!updated) throw new Error("baseline registry did not load the workspace");
+})();
+`,
+  );
+  const tsxCliPath = createRequire(import.meta.url).resolve("tsx/cli");
+  execFileSync(process.execPath, [tsxCliPath, runnerPath, input.workspaceFilePath], {
+    cwd: baselineRoot,
+    stdio: "pipe",
+  });
+}
 
 describe("resolveWorkspaceName", () => {
   test("prefers the user-set title over the derived display name", () => {
@@ -604,7 +704,7 @@ describe("workspace registries", () => {
     });
   });
 
-  test("keeps workspaces.json readable by the legacy array reader after pin-group writes", async () => {
+  test("reconciles mutations made by the actual ecec33265 registry after a downgrade", async () => {
     const filePath = path.join(tmpDir, "projects", "workspaces.json");
     const registry = new FileBackedWorkspaceRegistry(filePath, logger, {
       pinGroupIdFactory: () => "pgrp_focus",
@@ -622,44 +722,33 @@ describe("workspace registries", () => {
         updatedAt: "2026-08-31T12:00:00.000Z",
       }),
     );
-    const focus = await registry.createPinGroup("Focus");
     await registry.setWorkspacePinGroup({
       workspaceId: "ws-survives-downgrade",
-      groupId: focus.id,
+      groupId: DEFAULT_WORKSPACE_PIN_GROUP_ID,
       updatedAt: "2026-08-31T13:00:00.000Z",
     });
 
-    // This is the ecec33265 reader shape: an array of complete workspace records with no
-    // knowledge of pin-group fields or a registry envelope.
-    const legacyArrayReader = z.array(
-      z.object({
-        workspaceId: z.string(),
-        projectId: z.string(),
-        cwd: z.string(),
-        kind: z.enum(["local_checkout", "worktree", "directory"]),
-        displayName: z.string(),
-        title: z.string().nullable().optional(),
-        branch: z.string().nullable().optional(),
-        worktreeRoot: z.string().nullable(),
-        baseBranch: z.string().nullable().optional(),
-        isPaseoOwnedWorktree: z.boolean(),
-        mainRepoRoot: z.string().nullable(),
-        createdAt: z.string(),
-        updatedAt: z.string(),
-        archivedAt: z.string().nullable(),
-        autoArchivedChangeRequestUrl: z.string().nullable().optional(),
-        pinnedAt: z.string().nullable().optional(),
-        labels: z.array(z.string()).optional(),
-      }),
+    runBaselineWorkspaceUpdate({ sandboxRoot: tmpDir, workspaceFilePath: filePath });
+
+    const reupgraded = new FileBackedWorkspaceRegistry(filePath, logger);
+    await reupgraded.initialize();
+    expect(await reupgraded.get("ws-survives-downgrade")).toMatchObject({
+      workspaceId: "ws-survives-downgrade",
+      displayName: "renamed by ecec33265",
+      title: "Legacy title",
+      updatedAt: "2026-08-31T14:00:00.000Z",
+      pinnedAt: null,
+      pinGroupId: null,
+    });
+    const reupgradedPrimaryBytes = readFileSync(filePath, "utf8");
+    const reupgradedSidecar = JSON.parse(
+      readFileSync(path.join(tmpDir, "projects", "workspace-pin-groups.json"), "utf8"),
     );
-    const legacyWorkspaces = legacyArrayReader.parse(JSON.parse(readFileSync(filePath, "utf8")));
-    expect(legacyWorkspaces).toEqual([
-      expect.objectContaining({
-        workspaceId: "ws-survives-downgrade",
-        projectId: "proj-1",
-        pinnedAt: null,
-      }),
-    ]);
+    expect(reupgradedSidecar).toMatchObject({
+      formatVersion: 1,
+      primaryContentHash: fileHash(reupgradedPrimaryBytes),
+      memberships: {},
+    });
   });
 
   test("moves the pre-release workspace envelope into the downgrade-safe sidecar", async () => {
@@ -755,6 +844,172 @@ describe("workspace registries", () => {
     expect(readFileSync(sidecarPath, "utf8")).toBe(corruptSidecarBytes);
   });
 
+  test("restores an expected missing sidecar from its committed backup", async () => {
+    const filePath = path.join(tmpDir, "projects", "missing-sidecar-workspaces.json");
+    const sidecarPath = path.join(tmpDir, "projects", "missing-sidecar-workspaces.pin-groups.json");
+    const backupPath = path.join(
+      tmpDir,
+      "projects",
+      "missing-sidecar-workspaces.pin-groups.backup.json",
+    );
+    const registry = new FileBackedWorkspaceRegistry(filePath, logger, {
+      pinGroupIdFactory: () => "pgrp_restored",
+      now: () => "2026-08-31T12:00:00.000Z",
+    });
+    await registry.initialize();
+    await registry.createPinGroup("Restored");
+    const expectedSidecarBytes = readFileSync(sidecarPath, "utf8");
+    expect(readFileSync(backupPath, "utf8")).toBe(expectedSidecarBytes);
+    rmSync(sidecarPath);
+
+    const reloaded = new FileBackedWorkspaceRegistry(filePath, logger);
+    await reloaded.initialize();
+
+    expect((await reloaded.listPinGroups()).map((group) => group.id)).toEqual([
+      DEFAULT_WORKSPACE_PIN_GROUP_ID,
+      "pgrp_restored",
+    ]);
+    expect(readFileSync(sidecarPath, "utf8")).toBe(expectedSidecarBytes);
+  });
+
+  test("refuses to recreate pin groups when both expected catalog copies are missing", async () => {
+    const filePath = path.join(tmpDir, "projects", "missing-catalog-workspaces.json");
+    const sidecarPath = path.join(tmpDir, "projects", "missing-catalog-workspaces.pin-groups.json");
+    const backupPath = path.join(
+      tmpDir,
+      "projects",
+      "missing-catalog-workspaces.pin-groups.backup.json",
+    );
+    const markerPath = path.join(
+      tmpDir,
+      "projects",
+      "missing-catalog-workspaces.pin-groups.expected.json",
+    );
+    const registry = new FileBackedWorkspaceRegistry(filePath, logger, {
+      pinGroupIdFactory: () => "pgrp_must_survive",
+    });
+    await registry.initialize();
+    await registry.createPinGroup("Must survive");
+    const primaryBytes = readFileSync(filePath, "utf8");
+    const markerBytes = readFileSync(markerPath, "utf8");
+    rmSync(sidecarPath);
+    rmSync(backupPath);
+
+    const reloaded = new FileBackedWorkspaceRegistry(filePath, logger);
+    await expect(reloaded.initialize()).rejects.toThrow(
+      "Workspace pin-group sidecar and backup are missing",
+    );
+    expect(readFileSync(filePath, "utf8")).toBe(primaryBytes);
+    expect(readFileSync(markerPath, "utf8")).toBe(markerBytes);
+    expect(existsSync(sidecarPath)).toBe(false);
+    expect(existsSync(backupPath)).toBe(false);
+  });
+
+  test("rejects a newer sidecar format without stripping or rewriting it", async () => {
+    const filePath = path.join(tmpDir, "projects", "future-sidecar-workspaces.json");
+    const sidecarPath = path.join(tmpDir, "projects", "future-sidecar-workspaces.pin-groups.json");
+    const registry = new FileBackedWorkspaceRegistry(filePath, logger);
+    await registry.initialize();
+    const futureSidecar = {
+      ...JSON.parse(readFileSync(sidecarPath, "utf8")),
+      formatVersion: 2,
+      futureCatalog: { retained: true },
+    };
+    const futureBytes = JSON.stringify(futureSidecar);
+    writeFileSync(sidecarPath, futureBytes);
+
+    const reloaded = new FileBackedWorkspaceRegistry(filePath, logger);
+    await expect(reloaded.initialize()).rejects.toThrow(
+      "Unsupported workspace pin-group sidecar formatVersion 2",
+    );
+    expect(readFileSync(sidecarPath, "utf8")).toBe(futureBytes);
+  });
+
+  test("rejects a newer transaction format without touching registry bytes", async () => {
+    const filePath = path.join(tmpDir, "projects", "future-journal-workspaces.json");
+    const transactionPath = path.join(
+      tmpDir,
+      "projects",
+      "future-journal-workspaces.pin-groups.transaction.json",
+    );
+    const registry = new FileBackedWorkspaceRegistry(filePath, logger);
+    await registry.initialize();
+    const workspaceBytes = readFileSync(filePath, "utf8");
+    const futureJournalBytes = JSON.stringify({ formatVersion: 2, futureRecovery: true });
+    writeFileSync(transactionPath, futureJournalBytes);
+
+    const reloaded = new FileBackedWorkspaceRegistry(filePath, logger);
+    await expect(reloaded.initialize()).rejects.toThrow(
+      "Unsupported workspace pin-group transaction formatVersion 2",
+    );
+    expect(readFileSync(filePath, "utf8")).toBe(workspaceBytes);
+    expect(readFileSync(transactionPath, "utf8")).toBe(futureJournalBytes);
+  });
+
+  test("refuses to roll a prepared journal over a newer legacy primary write", async () => {
+    const filePath = path.join(tmpDir, "projects", "stale-journal-workspaces.json");
+    const sidecarPath = path.join(tmpDir, "projects", "stale-journal-workspaces.pin-groups.json");
+    const backupPath = path.join(
+      tmpDir,
+      "projects",
+      "stale-journal-workspaces.pin-groups.backup.json",
+    );
+    const transactionPath = path.join(
+      tmpDir,
+      "projects",
+      "stale-journal-workspaces.pin-groups.transaction.json",
+    );
+    const registry = new FileBackedWorkspaceRegistry(filePath, logger);
+    await registry.initialize();
+    await registry.upsert(
+      createPersistedWorkspaceRecord({
+        workspaceId: "ws-newer-primary",
+        projectId: "proj-1",
+        cwd: "/tmp/newer-primary",
+        kind: "directory",
+        displayName: "before legacy write",
+        createdAt: "2026-08-31T12:00:00.000Z",
+        updatedAt: "2026-08-31T12:00:00.000Z",
+      }),
+    );
+    const beforeWorkspaceBytes = readFileSync(filePath, "utf8");
+    const beforeSidecarBytes = readFileSync(sidecarPath, "utf8");
+    const beforeBackupBytes = readFileSync(backupPath, "utf8");
+    const afterPinGroups = JSON.parse(beforeSidecarBytes);
+    afterPinGroups.groups.push({
+      id: "pgrp_interrupted",
+      name: "Interrupted",
+      createdAt: "2026-08-31T13:00:00.000Z",
+    });
+    writeFileSync(
+      transactionPath,
+      serializedJson(
+        pinGroupTransaction({
+          phase: "prepared",
+          beforeWorkspaces: beforeWorkspaceBytes,
+          afterWorkspaces: JSON.parse(beforeWorkspaceBytes),
+          beforePinGroups: beforeSidecarBytes,
+          afterPinGroups,
+          beforePinGroupsBackup: beforeBackupBytes,
+        }),
+      ),
+    );
+    const legacyRecords = JSON.parse(beforeWorkspaceBytes);
+    legacyRecords[0].displayName = "written by old daemon";
+    legacyRecords[0].updatedAt = "2026-08-31T14:00:00.000Z";
+    const newerPrimaryBytes = serializedJson(legacyRecords);
+    writeFileSync(filePath, newerPrimaryBytes);
+
+    const reloaded = new FileBackedWorkspaceRegistry(filePath, logger);
+    await expect(reloaded.initialize()).rejects.toThrow(
+      "conflicts with a newer workspace registry file",
+    );
+    expect(readFileSync(filePath, "utf8")).toBe(newerPrimaryBytes);
+    expect(readFileSync(sidecarPath, "utf8")).toBe(beforeSidecarBytes);
+    expect(readFileSync(backupPath, "utf8")).toBe(beforeBackupBytes);
+    expect(existsSync(transactionPath)).toBe(true);
+  });
+
   test("rolls back a durable prepared journal whose write acknowledgement is lost", async () => {
     const filePath = path.join(tmpDir, "projects", "lost-prepare-ack-workspaces.json");
     const sidecarPath = path.join(
@@ -828,19 +1083,16 @@ describe("workspace registries", () => {
       now: () => "2026-08-31T12:00:00.000Z",
     });
     await baseline.initialize();
-    const sidecarWithFutureField = {
-      ...JSON.parse(readFileSync(sidecarPath, "utf8")),
-      futureCatalogVersion: 2,
-    };
     const beforeWorkspaceBytes = " [\n]\n";
-    const beforeSidecarBytes = `${JSON.stringify(sidecarWithFutureField)}\n`;
+    const beforeSidecarBytes = ` ${JSON.stringify(JSON.parse(readFileSync(sidecarPath, "utf8")))}\n`;
     writeFileSync(filePath, beforeWorkspaceBytes);
     writeFileSync(sidecarPath, beforeSidecarBytes);
 
     const failing = new FileBackedWorkspaceRegistry(filePath, logger, {
       pinGroupIdFactory: () => "pgrp_rejected",
       now: () => "2026-08-31T13:00:00.000Z",
-      writePinGroupsFile: async () => {
+      writePinGroupsFile: async (targetPath, state) => {
+        writeFileSync(targetPath, serializedJson(state));
         throw new Error("sidecar write failed");
       },
       writeRawFile: async () => {
@@ -895,12 +1147,8 @@ describe("workspace registries", () => {
     const focus = await baseline.createPinGroup("Focus");
     const workspaceWithFutureField = JSON.parse(readFileSync(filePath, "utf8"));
     workspaceWithFutureField[0].futureWorkspaceVersion = 2;
-    const sidecarWithFutureField = {
-      ...JSON.parse(readFileSync(sidecarPath, "utf8")),
-      futureCatalogVersion: 2,
-    };
     const beforeWorkspaceBytes = `${JSON.stringify(workspaceWithFutureField)}\n`;
-    const beforeSidecarBytes = ` ${JSON.stringify(sidecarWithFutureField)}\n`;
+    const beforeSidecarBytes = ` ${JSON.stringify(JSON.parse(readFileSync(sidecarPath, "utf8")))}\n`;
     writeFileSync(filePath, beforeWorkspaceBytes);
     writeFileSync(sidecarPath, beforeSidecarBytes);
 
@@ -935,9 +1183,15 @@ describe("workspace registries", () => {
     expect(readFileSync(sidecarPath, "utf8")).toBe(beforeSidecarBytes);
   });
 
-  test("keeps committed pin-group after-images and only cleans up their journal", async () => {
+  test("replays missing and known pre-transaction files from a committed journal", async () => {
     const filePath = path.join(tmpDir, "projects", "committed-workspaces.json");
     const sidecarPath = path.join(tmpDir, "projects", "committed-workspaces.pin-groups.json");
+    const backupPath = path.join(tmpDir, "projects", "committed-workspaces.pin-groups.backup.json");
+    const markerPath = path.join(
+      tmpDir,
+      "projects",
+      "committed-workspaces.pin-groups.expected.json",
+    );
     const transactionPath = path.join(
       tmpDir,
       "projects",
@@ -948,19 +1202,38 @@ describe("workspace registries", () => {
       now: () => "2026-08-31T12:00:00.000Z",
     });
     await baseline.initialize();
+    await baseline.upsert(
+      createPersistedWorkspaceRecord({
+        workspaceId: "ws-committed",
+        projectId: "proj-1",
+        cwd: "/tmp/committed",
+        kind: "directory",
+        displayName: "committed",
+        createdAt: "2026-08-31T12:00:00.000Z",
+        updatedAt: "2026-08-31T12:00:00.000Z",
+      }),
+    );
     await baseline.createPinGroup("Committed");
     const afterWorkspaceBytes = readFileSync(filePath, "utf8");
     const afterSidecarBytes = readFileSync(sidecarPath, "utf8");
+    const beforeWorkspaceBytes = "[]";
     writeFileSync(
       transactionPath,
-      JSON.stringify({
-        phase: "committed",
-        beforeWorkspaces: { exists: true, contents: "[]" },
-        afterWorkspaces: JSON.parse(afterWorkspaceBytes),
-        beforePinGroups: { exists: false },
-        afterPinGroups: JSON.parse(afterSidecarBytes),
-      }),
+      JSON.stringify(
+        pinGroupTransaction({
+          phase: "committed",
+          beforeWorkspaces: beforeWorkspaceBytes,
+          afterWorkspaces: JSON.parse(afterWorkspaceBytes),
+          beforePinGroups: null,
+          afterPinGroups: JSON.parse(afterSidecarBytes),
+          beforePinGroupsBackup: null,
+        }),
+      ),
     );
+    writeFileSync(filePath, beforeWorkspaceBytes);
+    rmSync(sidecarPath);
+    rmSync(backupPath);
+    rmSync(markerPath);
 
     const reloaded = new FileBackedWorkspaceRegistry(filePath, logger);
     await reloaded.initialize();
@@ -971,6 +1244,9 @@ describe("workspace registries", () => {
     ]);
     expect(readFileSync(filePath, "utf8")).toBe(afterWorkspaceBytes);
     expect(readFileSync(sidecarPath, "utf8")).toBe(afterSidecarBytes);
+    expect(readFileSync(backupPath, "utf8")).toBe(afterSidecarBytes);
+    expect(await reloaded.get("ws-committed")).toMatchObject({ workspaceId: "ws-committed" });
+    expect(existsSync(markerPath)).toBe(true);
     expect(existsSync(transactionPath)).toBe(false);
   });
 

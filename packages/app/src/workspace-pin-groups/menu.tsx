@@ -29,7 +29,12 @@ import type { Theme } from "@/styles/theme";
 import { confirmDialog } from "@/utils/confirm-dialog";
 import { useFetchQuery } from "@/data/query";
 import { useToast } from "@/contexts/toast-context";
-import { applyWorkspacePinGroupCatalog, workspacePinGroupsQueryKey } from "./catalog";
+import {
+  applyWorkspacePinGroupCatalog,
+  selectCurrentWorkspacePinGroupCatalog,
+  workspacePinGroupsQueryKey,
+} from "./catalog";
+import { useWorkspacePinGroupDeleteAction } from "./delete-action";
 import { buildWorkspacePinGroupMenuModel } from "./menu-model";
 
 const SWITCH_PAGE_ID = "workspacePinGroupsSwitch";
@@ -123,19 +128,20 @@ function SupportedWorkspacePinGroupMenu({
     staleTimeMs: 30_000,
   });
   const refetchGroups = groupsQuery.refetch;
-  const groups = groupsQuery.data ?? EMPTY_PIN_GROUPS;
+  const currentCatalog = selectCurrentWorkspacePinGroupCatalog(groupsQuery);
+  const groups = currentCatalog ?? EMPTY_PIN_GROUPS;
   const model = useMemo(
     () => buildWorkspacePinGroupMenuModel({ groups, activeGroupId }),
     [activeGroupId, groups],
   );
 
   useEffect(() => {
-    if (!groupsQuery.data) return;
+    if (!currentCatalog) return;
     useSidebarViewStore.getState().reconcilePinGroups(
       serverId,
-      groupsQuery.data.map((group) => group.id),
+      currentCatalog.map((group) => group.id),
     );
-  }, [groupsQuery.data, serverId]);
+  }, [currentCatalog, serverId]);
 
   const selectGroup = useCallback(
     (groupId: string) => {
@@ -160,25 +166,36 @@ function SupportedWorkspacePinGroupMenu({
     },
     [client, model.activeGroup, refetchGroups],
   );
-  const deleteGroup = useCallback(async () => {
+  const confirmDeleteGroup = useCallback(async () => {
     const activeGroup = model.activeGroup;
-    if (!activeGroup || activeGroup.id === DEFAULT_WORKSPACE_PIN_GROUP_ID) return;
-    const confirmed = await confirmDialog({
+    if (!activeGroup || activeGroup.id === DEFAULT_WORKSPACE_PIN_GROUP_ID) return false;
+    return confirmDialog({
       title: t("sidebar.pinned.groups.deleteTitle", { name: activeGroup.name }),
       message: t("sidebar.pinned.groups.deleteDescription"),
       confirmLabel: t("sidebar.pinned.groups.delete"),
       cancelLabel: t("common.actions.cancel"),
       destructive: true,
     });
-    if (!confirmed) return;
-    try {
-      await client.deleteWorkspacePinGroup(activeGroup.id);
-      setActivePinGroup({ serverId, groupId: DEFAULT_WORKSPACE_PIN_GROUP_ID });
-      await refetchGroups();
-    } catch (cause) {
+  }, [model.activeGroup, t]);
+  const executeDeleteGroup = useCallback(async () => {
+    const activeGroup = model.activeGroup;
+    if (!activeGroup || activeGroup.id === DEFAULT_WORKSPACE_PIN_GROUP_ID) return;
+    await client.deleteWorkspacePinGroup(activeGroup.id);
+    setActivePinGroup({ serverId, groupId: DEFAULT_WORKSPACE_PIN_GROUP_ID });
+    await refetchGroups();
+  }, [client, model.activeGroup, refetchGroups, serverId, setActivePinGroup]);
+  const handleDeleteError = useCallback(
+    (cause: unknown) => {
       toast.error(pinGroupErrorMessage(cause, t("sidebar.pinned.groups.actionError")));
-    }
-  }, [client, model.activeGroup, refetchGroups, serverId, setActivePinGroup, t, toast]);
+    },
+    [t, toast],
+  );
+  const deleteAction = useWorkspacePinGroupDeleteAction({
+    enabled: Boolean(model.activeGroup && model.activeGroup.id !== DEFAULT_WORKSPACE_PIN_GROUP_ID),
+    confirm: confirmDeleteGroup,
+    execute: executeDeleteGroup,
+    onError: handleDeleteError,
+  });
 
   const switchPage = useMemo(
     () => (
@@ -239,8 +256,8 @@ function SupportedWorkspacePinGroupMenu({
     void refetchGroups();
   }, [refetchGroups]);
   const selectDelete = useCallback(() => {
-    void deleteGroup();
-  }, [deleteGroup]);
+    void deleteAction.run();
+  }, [deleteAction]);
 
   return (
     <DropdownMenu compactMode="sheet">
@@ -261,7 +278,7 @@ function SupportedWorkspacePinGroupMenu({
         sheetTitle={t("sidebar.pinned.groups.menuTitle")}
         testID="sidebar-pin-groups-menu"
       >
-        {groupsQuery.isPending ? (
+        {groupsQuery.isPending || groupsQuery.isPlaceholderData ? (
           <DropdownMenuHint>{t("sidebar.pinned.groups.loading")}</DropdownMenuHint>
         ) : null}
         {groupsQuery.isError ? (
@@ -274,7 +291,7 @@ function SupportedWorkspacePinGroupMenu({
             </DropdownMenuItem>
           </>
         ) : null}
-        {groupsQuery.isSuccess ? (
+        {groupsQuery.isSuccess && !groupsQuery.isPlaceholderData ? (
           <>
             <DropdownMenuSubTrigger
               id={SWITCH_PAGE_ID}
@@ -295,6 +312,10 @@ function SupportedWorkspacePinGroupMenu({
             {model.actions.includes("delete") ? (
               <DropdownMenuItem
                 destructive
+                closeOnSelect={false}
+                disabled={deleteAction.pending}
+                status={deleteAction.pending ? "pending" : "idle"}
+                pendingLabel={t("sidebar.pinned.groups.deleting")}
                 onSelect={selectDelete}
                 testID="sidebar-pin-group-delete"
               >

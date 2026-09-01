@@ -261,6 +261,7 @@ const StoredWorkspaceSchema = z.strictObject({
   name: z.string(),
   title: z.string().nullable(),
   pinnedAt: z.string().nullable(),
+  // COMPAT(workspacePinGroups): added in v0.7.0, remove optional after 2027-03-01.
   pinGroupId: z.string().nullable().optional(),
   pinGroupAssignedAt: z.string().nullable().optional(),
   // Optional because entries written before labels existed have none. A cached workspace that
@@ -629,6 +630,7 @@ function serializeWorkspace(workspace: WorkspaceDescriptor): StoredWorkspace {
     name: workspace.name,
     title: workspace.title ?? null,
     pinnedAt: workspace.pinnedAt ?? null,
+    // COMPAT(workspacePinGroups): added in v0.7.0, remove null defaults after 2027-03-01.
     pinGroupId: workspace.pinGroupId ?? null,
     pinGroupAssignedAt: workspace.pinGroupAssignedAt ?? null,
     labels: workspace.labels,

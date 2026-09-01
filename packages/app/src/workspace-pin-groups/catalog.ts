@@ -8,6 +8,15 @@ export function workspacePinGroupsQueryKey(
   return ["workspacePinGroups", serverId];
 }
 
+export function selectCurrentWorkspacePinGroupCatalog(
+  input: Readonly<{
+    data: readonly WorkspacePinGroup[] | undefined;
+    isPlaceholderData: boolean;
+  }>,
+): readonly WorkspacePinGroup[] | undefined {
+  return input.isPlaceholderData ? undefined : input.data;
+}
+
 export function applyWorkspacePinGroupCatalog(input: {
   queryClient: QueryClient;
   serverId: string;
