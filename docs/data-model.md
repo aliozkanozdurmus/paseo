@@ -437,7 +437,9 @@ workspace together with its owning project.
 
 **Path:** `$PASEO_HOME/projects/workspaces.json`
 
-Array of workspace records. A workspace is a specific working directory within a project.
+The file is an envelope `{ workspaces, pinGroups }` so membership and the group catalog change in one
+atomic write. The reader still accepts the legacy workspace array and rewrites it as the envelope
+during initialization. A workspace is a specific working directory within a project.
 
 | Field                          | Type                                            | Description                                                                                                                                                                                   |
 | ------------------------------ | ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -457,9 +459,16 @@ Array of workspace records. A workspace is a specific working directory within a
 | `archivedAt`                   | `string \| null` (ISO 8601)                     | Soft-delete; required nullable                                                                                                                                                                |
 | `autoArchivedChangeRequestUrl` | `string \| null`                                | Change request whose merged state triggered auto-archive. Restore replaces it with the current merged change request, when present, so repeated snapshots cannot archive the workspace again. |
 | `labels`                       | `string[]?`                                     | Normalized display names assigned from this host's shared label catalog. Missing means unlabelled.                                                                                            |
-| `pinnedAt`                     | `string \| null` (ISO 8601)                     | Pinned-to-top-of-sidebar timestamp; null means "not pinned"                                                                                                                                   |
+| `pinGroupId`                   | `string \| null`                                | Membership in one daemon-shared pin group. Null means unpinned.                                                                                                                               |
+| `pinnedAt`                     | `string \| null` (ISO 8601)                     | Old-client pin projection. Non-null only for membership in the `default` group.                                                                                                               |
 
 > **Opaque-ID invariant:** `workspaceId` is opaque identity, never a filesystem path. Filesystem and git operations take `cwd`/`workspaceDirectory` only — never the id. A compatibility-only first-materialization bootstrap still groups pre-registry agent records by path and Git remote so existing installs retain their legacy records. That grouping never runs against a live registry, and its keys are not runtime project or workspace identity.
+
+### Workspace pin groups
+
+Each group stores an opaque `id`, display `name`, and ISO `createdAt`. The daemon always owns the
+`default` group named `Pinned`; you cannot rename or delete it. Legacy records with `pinnedAt` join
+that group on initialization. Deleting another group clears its members in the same registry write.
 
 ### Workspace label catalog
 

@@ -1,6 +1,6 @@
 import os from "node:os";
 import path from "node:path";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 
 import { beforeEach, afterEach, describe, expect, test } from "vitest";
 
@@ -11,6 +11,7 @@ import {
   createPersistedWorkspaceRecord,
   FileBackedProjectRegistry,
   FileBackedWorkspaceRegistry,
+  DEFAULT_WORKSPACE_PIN_GROUP_ID,
   resolveWorkspaceDisplayName,
   resolveWorkspaceName,
 } from "./workspace-registry.js";
@@ -536,6 +537,154 @@ describe("workspace registries", () => {
     expect(await reloadedRegistry.get("ws-1")).toMatchObject({
       title: "Payments work",
       pinnedAt: "2026-03-03T00:00:00.000Z",
+      pinGroupId: DEFAULT_WORKSPACE_PIN_GROUP_ID,
     });
+  });
+
+  test("migrates the legacy workspace array and its pinned records into the default group", async () => {
+    const filePath = path.join(tmpDir, "projects", "legacy-workspaces.json");
+    mkdirSync(path.dirname(filePath), { recursive: true });
+    const pinned = createPersistedWorkspaceRecord({
+      workspaceId: "ws-pinned",
+      projectId: "proj-1",
+      cwd: "/tmp/pinned",
+      kind: "directory",
+      displayName: "pinned",
+      createdAt: "2026-03-01T00:00:00.000Z",
+      updatedAt: "2026-03-02T00:00:00.000Z",
+      pinnedAt: "2026-03-02T00:00:00.000Z",
+    });
+    const { pinGroupId, ...legacyPinned } = pinned;
+    expect(pinGroupId).toBe(DEFAULT_WORKSPACE_PIN_GROUP_ID);
+    writeFileSync(filePath, JSON.stringify([legacyPinned]));
+
+    const migrated = new FileBackedWorkspaceRegistry(filePath, logger, {
+      now: () => "2026-08-31T00:00:00.000Z",
+    });
+    await migrated.initialize();
+
+    expect(await migrated.listPinGroups()).toEqual([
+      {
+        id: DEFAULT_WORKSPACE_PIN_GROUP_ID,
+        name: "Pinned",
+        createdAt: "2026-03-02T00:00:00.000Z",
+      },
+    ]);
+    expect(await migrated.get("ws-pinned")).toMatchObject({
+      pinGroupId: DEFAULT_WORKSPACE_PIN_GROUP_ID,
+      pinnedAt: "2026-03-02T00:00:00.000Z",
+    });
+    expect(JSON.parse(readFileSync(filePath, "utf8"))).toMatchObject({
+      workspaces: [
+        {
+          workspaceId: "ws-pinned",
+          pinGroupId: DEFAULT_WORKSPACE_PIN_GROUP_ID,
+          pinnedAt: "2026-03-02T00:00:00.000Z",
+        },
+      ],
+      pinGroups: [{ id: DEFAULT_WORKSPACE_PIN_GROUP_ID, name: "Pinned" }],
+    });
+  });
+
+  test("creates, renames, lists, and persists pin groups with trimmed names", async () => {
+    const filePath = path.join(tmpDir, "projects", "group-workspaces.json");
+    const registry = new FileBackedWorkspaceRegistry(filePath, logger, {
+      pinGroupIdFactory: () => "pgrp_focus",
+      now: () => "2026-08-31T12:00:00.000Z",
+    });
+    await registry.initialize();
+
+    const created = await registry.createPinGroup("  Focus  ");
+    expect(created).toEqual({
+      id: "pgrp_focus",
+      name: "Focus",
+      createdAt: "2026-08-31T12:00:00.000Z",
+    });
+    await expect(registry.createPinGroup("   ")).rejects.toThrow(
+      "Pin group name must not be empty",
+    );
+    expect(await registry.renamePinGroup(created.id, "  This week ")).toEqual({
+      ...created,
+      name: "This week",
+    });
+    await expect(
+      registry.renamePinGroup(DEFAULT_WORKSPACE_PIN_GROUP_ID, "Favorites"),
+    ).rejects.toThrow("The default pin group cannot be renamed");
+    await expect(registry.deletePinGroup(DEFAULT_WORKSPACE_PIN_GROUP_ID)).rejects.toThrow(
+      "The default pin group cannot be deleted",
+    );
+
+    await registry.upsert(
+      createPersistedWorkspaceRecord({
+        workspaceId: "ws-preserves-groups",
+        projectId: "proj-1",
+        cwd: "/tmp/preserves-groups",
+        kind: "directory",
+        displayName: "preserves-groups",
+        createdAt: "2026-08-31T12:00:00.000Z",
+        updatedAt: "2026-08-31T12:00:00.000Z",
+      }),
+    );
+    const reloaded = new FileBackedWorkspaceRegistry(filePath, logger);
+    await reloaded.initialize();
+    expect(await reloaded.listPinGroups()).toEqual([
+      {
+        id: DEFAULT_WORKSPACE_PIN_GROUP_ID,
+        name: "Pinned",
+        createdAt: "2026-08-31T12:00:00.000Z",
+      },
+      { ...created, name: "This week" },
+    ]);
+  });
+
+  test("writes pinnedAt only for default members and unpins members when deleting a group", async () => {
+    const filePath = path.join(tmpDir, "projects", "membership-workspaces.json");
+    const registry = new FileBackedWorkspaceRegistry(filePath, logger, {
+      pinGroupIdFactory: () => "pgrp_focus",
+      now: () => "2026-08-31T12:00:00.000Z",
+    });
+    await registry.initialize();
+    const focus = await registry.createPinGroup("Focus");
+    for (const workspaceId of ["ws-default", "ws-focus"]) {
+      await registry.upsert(
+        createPersistedWorkspaceRecord({
+          workspaceId,
+          projectId: "proj-1",
+          cwd: `/tmp/${workspaceId}`,
+          kind: "directory",
+          displayName: workspaceId,
+          createdAt: "2026-08-31T12:00:00.000Z",
+          updatedAt: "2026-08-31T12:00:00.000Z",
+        }),
+      );
+    }
+
+    expect(
+      await registry.setWorkspacePinGroup({
+        workspaceId: "ws-default",
+        groupId: DEFAULT_WORKSPACE_PIN_GROUP_ID,
+        updatedAt: "2026-08-31T13:00:00.000Z",
+      }),
+    ).toMatchObject({
+      pinGroupId: DEFAULT_WORKSPACE_PIN_GROUP_ID,
+      pinnedAt: "2026-08-31T13:00:00.000Z",
+    });
+    expect(
+      await registry.setWorkspacePinGroup({
+        workspaceId: "ws-focus",
+        groupId: focus.id,
+        updatedAt: "2026-08-31T13:01:00.000Z",
+      }),
+    ).toMatchObject({ pinGroupId: focus.id, pinnedAt: null });
+
+    expect(await registry.deletePinGroup(focus.id)).toEqual(["ws-focus"]);
+    expect(await registry.get("ws-focus")).toMatchObject({
+      pinGroupId: null,
+      pinnedAt: null,
+      archivedAt: null,
+    });
+    expect((await registry.listPinGroups()).map((group) => group.id)).toEqual([
+      DEFAULT_WORKSPACE_PIN_GROUP_ID,
+    ]);
   });
 });

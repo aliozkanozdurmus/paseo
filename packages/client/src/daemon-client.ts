@@ -15,6 +15,7 @@ import {
   SessionInboundMessageSchema,
   type ActiveTurnBehavior,
   type ServerInfoStatusPayload,
+  type WorkspacePinGroup,
 } from "@getpaseo/protocol/messages";
 import { validateWSOutboundMessage } from "@getpaseo/protocol/validation/ws-outbound";
 import type {
@@ -2699,21 +2700,61 @@ export class DaemonClient {
   async setWorkspacePinned(
     workspaceId: string,
     pinned: boolean,
+    groupId?: string,
     requestId?: string,
-  ): Promise<{ pinnedAt: string | null }> {
+  ): Promise<{ pinnedAt: string | null; groupId: string | null }> {
     const payload = await this.sendCorrelatedSessionRequest({
       requestId,
       message: {
         type: "workspace.pin.set.request",
         workspaceId,
         pinned,
+        ...(groupId === undefined ? {} : { groupId }),
       },
       responseType: "workspace.pin.set.response",
     });
     if (!payload.accepted) {
       throw new Error(payload.error ?? "setWorkspacePinned rejected");
     }
-    return { pinnedAt: payload.pinnedAt };
+    return { pinnedAt: payload.pinnedAt, groupId: payload.groupId ?? null };
+  }
+
+  async listWorkspacePinGroups(requestId?: string): Promise<WorkspacePinGroup[]> {
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"workspace.pin_group.list.response">({
+        requestId,
+        message: { type: "workspace.pin_group.list.request" },
+      });
+    return payload.groups;
+  }
+
+  async createWorkspacePinGroup(name: string, requestId?: string): Promise<WorkspacePinGroup> {
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"workspace.pin_group.create.response">({
+        requestId,
+        message: { type: "workspace.pin_group.create.request", name },
+      });
+    return payload.group;
+  }
+
+  async renameWorkspacePinGroup(
+    groupId: string,
+    name: string,
+    requestId?: string,
+  ): Promise<WorkspacePinGroup> {
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"workspace.pin_group.rename.response">({
+        requestId,
+        message: { type: "workspace.pin_group.rename.request", groupId, name },
+      });
+    return payload.group;
+  }
+
+  async deleteWorkspacePinGroup(groupId: string, requestId?: string): Promise<void> {
+    await this.sendNamespacedCorrelatedSessionRequest<"workspace.pin_group.delete.response">({
+      requestId,
+      message: { type: "workspace.pin_group.delete.request", groupId },
+    });
   }
 
   async inspectWorkspaceRecovery(

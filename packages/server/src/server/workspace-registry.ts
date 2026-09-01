@@ -2,11 +2,13 @@ import { promises as fs } from "node:fs";
 
 import type { Logger } from "pino";
 import { z } from "zod";
+import { WorkspacePinGroupSchema, type WorkspacePinGroup } from "@getpaseo/protocol/messages";
 
 import { writeJsonFileAtomic } from "./atomic-file.js";
 import { areEquivalentPaths } from "../utils/path.js";
 import {
   generateProjectId,
+  generateWorkspacePinGroupId,
   type PersistedProjectKind,
   type PersistedWorkspaceKind,
 } from "./workspace-registry-model.js";
@@ -92,11 +94,77 @@ const PersistedWorkspaceRecordSchema = z.object({
     .nullable()
     .optional()
     .transform((value) => value ?? null),
+  pinGroupId: z
+    .string()
+    .nullable()
+    .optional()
+    .transform((value) => value ?? null),
   labels: z.array(z.string()).optional(),
 });
 
+const WorkspaceRegistryFileSchema = z.union([
+  z.array(PersistedWorkspaceRecordSchema),
+  z.object({
+    workspaces: z.array(PersistedWorkspaceRecordSchema),
+    pinGroups: z.array(WorkspacePinGroupSchema),
+  }),
+]);
+
+export const DEFAULT_WORKSPACE_PIN_GROUP_ID = "default";
+export const DEFAULT_WORKSPACE_PIN_GROUP_NAME = "Pinned";
+
+export type WorkspacePinGroupErrorCode =
+  | "invalid_name"
+  | "default_group_immutable"
+  | "group_not_found";
+
+export class WorkspacePinGroupError extends Error {
+  constructor(
+    public readonly code: WorkspacePinGroupErrorCode,
+    message: string,
+  ) {
+    super(message);
+    this.name = "WorkspacePinGroupError";
+  }
+}
+
+function normalizePinGroupName(name: string): string {
+  const normalized = name.trim();
+  if (!normalized) {
+    throw new WorkspacePinGroupError("invalid_name", "Pin group name must not be empty");
+  }
+  return normalized;
+}
+
+function normalizeWorkspacePinMembership(
+  workspace: PersistedWorkspaceRecord,
+  pinGroups: ReadonlyMap<string, WorkspacePinGroup>,
+): PersistedWorkspaceRecord {
+  let pinGroupId = workspace.pinGroupId;
+  if (!pinGroupId && workspace.pinnedAt) pinGroupId = DEFAULT_WORKSPACE_PIN_GROUP_ID;
+  if (pinGroupId && !pinGroups.has(pinGroupId)) pinGroupId = null;
+
+  let pinnedAt = workspace.pinnedAt;
+  if (pinGroupId === DEFAULT_WORKSPACE_PIN_GROUP_ID && !pinnedAt) {
+    pinnedAt = workspace.updatedAt;
+  } else if (pinGroupId !== DEFAULT_WORKSPACE_PIN_GROUP_ID) {
+    pinnedAt = null;
+  }
+  return { ...workspace, pinGroupId, pinnedAt };
+}
+
 export type PersistedProjectRecord = z.infer<typeof PersistedProjectRecordSchema>;
 export type PersistedWorkspaceRecord = z.infer<typeof PersistedWorkspaceRecordSchema>;
+
+export interface PersistedWorkspaceRegistryFile {
+  workspaces: readonly PersistedWorkspaceRecord[];
+  pinGroups: readonly WorkspacePinGroup[];
+}
+
+interface WorkspaceRegistryPersistenceState {
+  pinGroups: Map<string, WorkspacePinGroup>;
+  needsMigration: boolean;
+}
 
 export interface WorkspaceMutation {
   kind: "upsert" | "archive" | "remove";
@@ -158,6 +226,15 @@ export interface WorkspaceRegistry {
     context?: WorkspaceArchiveContext,
   ): Promise<void>;
   remove(workspaceId: string): Promise<void>;
+  listPinGroups(): Promise<WorkspacePinGroup[]>;
+  createPinGroup(name: string): Promise<WorkspacePinGroup>;
+  renamePinGroup(groupId: string, name: string): Promise<WorkspacePinGroup>;
+  deletePinGroup(groupId: string): Promise<string[]>;
+  setWorkspacePinGroup(input: {
+    workspaceId: string;
+    groupId: string | null;
+    updatedAt: string;
+  }): Promise<PersistedWorkspaceRecord | null>;
   /** Central lifecycle seam for daemon-global workspace observers. */
   subscribeToMutations?(
     listener: (mutation: WorkspaceMutation) => void | Promise<void>,
@@ -176,6 +253,7 @@ class FileBackedRegistry<TRecord extends RegistryRecord> {
   private mutationQueue: Promise<void> = Promise.resolve();
   private mutationsBlockedUntilRestart = false;
   private readonly writeRecords: (filePath: string, records: readonly TRecord[]) => Promise<void>;
+  private readonly parseRecords: (value: unknown) => readonly TRecord[];
 
   constructor(options: {
     filePath: string;
@@ -184,6 +262,7 @@ class FileBackedRegistry<TRecord extends RegistryRecord> {
     getId: (record: TRecord) => string;
     component: string;
     writeRecords?: (filePath: string, records: readonly TRecord[]) => Promise<void>;
+    parseRecords?: (value: unknown) => readonly TRecord[];
   }) {
     this.filePath = options.filePath;
     this.schema = options.schema;
@@ -193,6 +272,7 @@ class FileBackedRegistry<TRecord extends RegistryRecord> {
       component: options.component,
     });
     this.writeRecords = options.writeRecords ?? writeJsonFileAtomic;
+    this.parseRecords = options.parseRecords ?? ((value) => z.array(this.schema).parse(value));
   }
 
   async initialize(): Promise<void> {
@@ -281,7 +361,7 @@ class FileBackedRegistry<TRecord extends RegistryRecord> {
     this.cache.clear();
     try {
       const raw = await fs.readFile(this.filePath, "utf8");
-      const parsed = z.array(this.schema).parse(JSON.parse(raw));
+      const parsed = this.parseRecords(JSON.parse(raw));
       for (const record of parsed) {
         this.cache.set(this.getId(record), record);
       }
@@ -313,6 +393,8 @@ class FileBackedRegistry<TRecord extends RegistryRecord> {
       beforeWrite?: (records: readonly TRecord[]) => Promise<void>;
       afterWrite?: () => Promise<void>;
       afterCommit?: () => void;
+      forceRecordWrite?: (result: TResult) => boolean;
+      writeRecords?: (records: readonly TRecord[]) => Promise<void>;
     },
   ): Promise<TResult> {
     const previous = this.mutationQueue;
@@ -329,10 +411,14 @@ class FileBackedRegistry<TRecord extends RegistryRecord> {
       const staged = new Map(this.cache);
       const result = updater(staged);
       const recordsChanged = !mapsEqual(this.cache, staged);
-      if (!recordsChanged && !hooks?.forcePersist?.(result)) return result;
+      const forcePersist = hooks?.forcePersist?.(result) === true;
+      const forceRecordWrite = hooks?.forceRecordWrite?.(result) === true;
+      if (!recordsChanged && !forcePersist && !forceRecordWrite) return result;
       const records = Array.from(staged.values());
       await hooks?.beforeWrite?.(records);
-      if (recordsChanged) await this.writeRecords(this.filePath, records);
+      if (recordsChanged || forceRecordWrite) {
+        await this.persistRecords(records, hooks?.writeRecords);
+      }
       await hooks?.afterWrite?.();
       if (recordsChanged) {
         this.cache.clear();
@@ -347,6 +433,17 @@ class FileBackedRegistry<TRecord extends RegistryRecord> {
 
   protected freezeMutationsUntilRestart(): void {
     this.mutationsBlockedUntilRestart = true;
+  }
+
+  private async persistRecords(
+    records: readonly TRecord[],
+    writer?: (records: readonly TRecord[]) => Promise<void>,
+  ): Promise<void> {
+    if (writer) {
+      await writer(records);
+      return;
+    }
+    await this.writeRecords(this.filePath, records);
   }
 }
 
@@ -499,6 +596,14 @@ export class FileBackedWorkspaceRegistry
   extends FileBackedRegistry<PersistedWorkspaceRecord>
   implements WorkspaceRegistry
 {
+  private readonly registryFilePath: string;
+  private readonly pinGroupIdFactory: () => string;
+  private readonly now: () => string;
+  private readonly persistenceState: WorkspaceRegistryPersistenceState;
+  private readonly writeRegistryFile: (
+    filePath: string,
+    registry: PersistedWorkspaceRegistryFile,
+  ) => Promise<void>;
   private readonly mutationListeners = new Set<
     (mutation: WorkspaceMutation) => void | Promise<void>
   >();
@@ -507,20 +612,230 @@ export class FileBackedWorkspaceRegistry
     filePath: string,
     logger: Logger,
     options?: {
-      writeRecords?: (
-        filePath: string,
-        records: readonly PersistedWorkspaceRecord[],
-      ) => Promise<void>;
+      writeRecords?: (filePath: string, registry: PersistedWorkspaceRegistryFile) => Promise<void>;
+      pinGroupIdFactory?: () => string;
+      now?: () => string;
     },
   ) {
+    const now = options?.now ?? (() => new Date().toISOString());
+    const persistenceState: WorkspaceRegistryPersistenceState = {
+      pinGroups: new Map(),
+      needsMigration: false,
+    };
+    const writeRegistryFile = options?.writeRecords ?? writeJsonFileAtomic;
     super({
       filePath,
       logger,
       schema: PersistedWorkspaceRecordSchema,
       getId: (record) => record.workspaceId,
       component: "workspaces",
-      writeRecords: options?.writeRecords,
+      parseRecords: (value) => {
+        const parsed = WorkspaceRegistryFileSchema.parse(value);
+        const isLegacy = Array.isArray(parsed);
+        const workspaces = isLegacy ? parsed : parsed.workspaces;
+        const storedGroups = isLegacy ? [] : parsed.pinGroups;
+        const pinGroups = new Map(storedGroups.map((group) => [group.id, group]));
+        const defaultCreatedAt =
+          workspaces
+            .map((workspace) => workspace.pinnedAt)
+            .filter((pinnedAt): pinnedAt is string => pinnedAt !== null)
+            .sort()[0] ?? now();
+        const storedDefault = pinGroups.get(DEFAULT_WORKSPACE_PIN_GROUP_ID);
+        pinGroups.set(DEFAULT_WORKSPACE_PIN_GROUP_ID, {
+          id: DEFAULT_WORKSPACE_PIN_GROUP_ID,
+          name: DEFAULT_WORKSPACE_PIN_GROUP_NAME,
+          createdAt: storedDefault?.createdAt ?? defaultCreatedAt,
+        });
+
+        let normalizedMembership = false;
+        const normalizedWorkspaces = workspaces.map((workspace) => {
+          const normalized = normalizeWorkspacePinMembership(workspace, pinGroups);
+          if (
+            normalized.pinGroupId !== workspace.pinGroupId ||
+            normalized.pinnedAt !== workspace.pinnedAt
+          ) {
+            normalizedMembership = true;
+          }
+          return normalized;
+        });
+
+        persistenceState.pinGroups = pinGroups;
+        persistenceState.needsMigration =
+          isLegacy || !storedDefault || storedDefault.name !== DEFAULT_WORKSPACE_PIN_GROUP_NAME;
+        persistenceState.needsMigration ||= normalizedMembership;
+        return normalizedWorkspaces;
+      },
+      writeRecords: async (targetPath, records) => {
+        await writeRegistryFile(targetPath, {
+          workspaces: records,
+          pinGroups: Array.from(persistenceState.pinGroups.values()),
+        });
+      },
     });
+    this.registryFilePath = filePath;
+    this.pinGroupIdFactory = options?.pinGroupIdFactory ?? generateWorkspacePinGroupId;
+    this.now = now;
+    this.persistenceState = persistenceState;
+    this.writeRegistryFile = writeRegistryFile;
+  }
+
+  override async initialize(): Promise<void> {
+    await super.initialize();
+    if (!this.persistenceState.pinGroups.has(DEFAULT_WORKSPACE_PIN_GROUP_ID)) {
+      this.persistenceState.pinGroups.set(DEFAULT_WORKSPACE_PIN_GROUP_ID, {
+        id: DEFAULT_WORKSPACE_PIN_GROUP_ID,
+        name: DEFAULT_WORKSPACE_PIN_GROUP_NAME,
+        createdAt: this.now(),
+      });
+      this.persistenceState.needsMigration = true;
+    }
+    if (!this.persistenceState.needsMigration) return;
+    await this.mutateCache((records) => records.size, {
+      forceRecordWrite: () => true,
+    });
+    this.persistenceState.needsMigration = false;
+  }
+
+  async listPinGroups(): Promise<WorkspacePinGroup[]> {
+    await this.initialize();
+    return Array.from(this.persistenceState.pinGroups.values()).sort((left, right) => {
+      if (left.id === DEFAULT_WORKSPACE_PIN_GROUP_ID) return -1;
+      if (right.id === DEFAULT_WORKSPACE_PIN_GROUP_ID) return 1;
+      return left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id);
+    });
+  }
+
+  async createPinGroup(name: string): Promise<WorkspacePinGroup> {
+    const normalizedName = normalizePinGroupName(name);
+    return this.commitPinGroupMutation((_, pinGroups) => {
+      let id = this.pinGroupIdFactory();
+      while (pinGroups.has(id)) id = this.pinGroupIdFactory();
+      const group = WorkspacePinGroupSchema.parse({
+        id,
+        name: normalizedName,
+        createdAt: this.now(),
+      });
+      pinGroups.set(id, group);
+      return { value: group, changedWorkspaces: [] };
+    });
+  }
+
+  async renamePinGroup(groupId: string, name: string): Promise<WorkspacePinGroup> {
+    if (groupId === DEFAULT_WORKSPACE_PIN_GROUP_ID) {
+      throw new WorkspacePinGroupError(
+        "default_group_immutable",
+        "The default pin group cannot be renamed",
+      );
+    }
+    const normalizedName = normalizePinGroupName(name);
+    return this.commitPinGroupMutation((_, pinGroups) => {
+      const existing = pinGroups.get(groupId);
+      if (!existing) {
+        throw new WorkspacePinGroupError("group_not_found", "Pin group not found");
+      }
+      const group = { ...existing, name: normalizedName };
+      pinGroups.set(groupId, group);
+      return { value: group, changedWorkspaces: [] };
+    });
+  }
+
+  async deletePinGroup(groupId: string): Promise<string[]> {
+    if (groupId === DEFAULT_WORKSPACE_PIN_GROUP_ID) {
+      throw new WorkspacePinGroupError(
+        "default_group_immutable",
+        "The default pin group cannot be deleted",
+      );
+    }
+    const updatedAt = this.now();
+    return this.commitPinGroupMutation((workspaces, pinGroups) => {
+      if (!pinGroups.delete(groupId)) {
+        throw new WorkspacePinGroupError("group_not_found", "Pin group not found");
+      }
+      const changedWorkspaces: PersistedWorkspaceRecord[] = [];
+      for (const workspace of workspaces.values()) {
+        if (workspace.pinGroupId !== groupId) continue;
+        const updated = { ...workspace, pinGroupId: null, pinnedAt: null, updatedAt };
+        workspaces.set(workspace.workspaceId, updated);
+        changedWorkspaces.push(updated);
+      }
+      return {
+        value: changedWorkspaces.map((workspace) => workspace.workspaceId),
+        changedWorkspaces,
+      };
+    });
+  }
+
+  async setWorkspacePinGroup(input: {
+    workspaceId: string;
+    groupId: string | null;
+    updatedAt: string;
+  }): Promise<PersistedWorkspaceRecord | null> {
+    await this.initialize();
+    const workspace = await this.mutateCache((workspaces) => {
+      if (input.groupId && !this.persistenceState.pinGroups.has(input.groupId)) {
+        throw new WorkspacePinGroupError("group_not_found", "Pin group not found");
+      }
+      const existing = workspaces.get(input.workspaceId);
+      if (!existing) return null;
+      // COMPAT(pinGroups): added in v0.7.x, remove after 2027-03-01
+      const pinnedAt = input.groupId === DEFAULT_WORKSPACE_PIN_GROUP_ID ? input.updatedAt : null;
+      const updated = PersistedWorkspaceRecordSchema.parse({
+        ...existing,
+        pinGroupId: input.groupId,
+        pinnedAt,
+        updatedAt: input.updatedAt,
+      });
+      workspaces.set(input.workspaceId, updated);
+      return updated;
+    });
+    if (workspace) {
+      await this.notifyMutation({
+        kind: "upsert",
+        workspaceId: workspace.workspaceId,
+        workspace,
+      });
+    }
+    return workspace;
+  }
+
+  private async commitPinGroupMutation<TResult>(
+    stage: (
+      workspaces: Map<string, PersistedWorkspaceRecord>,
+      pinGroups: Map<string, WorkspacePinGroup>,
+    ) => { value: TResult; changedWorkspaces: PersistedWorkspaceRecord[] },
+  ): Promise<TResult> {
+    await this.initialize();
+    let nextPinGroups = this.persistenceState.pinGroups;
+    let changedWorkspaces: PersistedWorkspaceRecord[] = [];
+    const value = await this.mutateCache(
+      (workspaces) => {
+        const stagedPinGroups = new Map(this.persistenceState.pinGroups);
+        const staged = stage(workspaces, stagedPinGroups);
+        nextPinGroups = stagedPinGroups;
+        changedWorkspaces = staged.changedWorkspaces.map((workspace) =>
+          PersistedWorkspaceRecordSchema.parse(workspace),
+        );
+        return staged.value;
+      },
+      {
+        forceRecordWrite: () => true,
+        writeRecords: async (workspaces) => {
+          await this.writeRegistryFile(this.registryFilePath, {
+            workspaces,
+            pinGroups: Array.from(nextPinGroups.values()),
+          });
+        },
+        afterCommit: () => {
+          this.persistenceState.pinGroups = nextPinGroups;
+        },
+      },
+    );
+    await Promise.all(
+      changedWorkspaces.map((workspace) =>
+        this.notifyMutation({ kind: "upsert", workspaceId: workspace.workspaceId, workspace }),
+      ),
+    );
+    return value;
   }
 
   subscribeToMutations(
@@ -534,7 +849,10 @@ export class FileBackedWorkspaceRegistry
     workspaceId: string,
     updater: (record: PersistedWorkspaceRecord) => PersistedWorkspaceRecord,
   ): Promise<PersistedWorkspaceRecord | null> {
-    const workspace = await super.update(workspaceId, updater);
+    await this.initialize();
+    const workspace = await super.update(workspaceId, (existing) =>
+      normalizeWorkspacePinMembership(updater(existing), this.persistenceState.pinGroups),
+    );
     if (workspace) {
       await this.notifyMutation({ kind: "upsert", workspaceId, workspace });
     }
@@ -545,11 +863,18 @@ export class FileBackedWorkspaceRegistry
     record: PersistedWorkspaceRecord,
     context?: WorkspaceMutationContext,
   ): Promise<void> {
-    await super.upsert(record);
+    await this.initialize();
+    const normalized = await this.mutateCache((workspaces) => {
+      const parsed = PersistedWorkspaceRecordSchema.parse(
+        normalizeWorkspacePinMembership(record, this.persistenceState.pinGroups),
+      );
+      workspaces.set(parsed.workspaceId, parsed);
+      return parsed;
+    });
     await this.notifyMutation({
       kind: "upsert",
-      workspaceId: record.workspaceId,
-      workspace: record,
+      workspaceId: normalized.workspaceId,
+      workspace: normalized,
       ...(context?.expectsInitialAgent ? { expectsInitialAgent: true } : {}),
     });
   }
@@ -673,8 +998,11 @@ export function createPersistedWorkspaceRecord(input: {
   archivedAt?: string | null;
   autoArchivedChangeRequestUrl?: string | null;
   pinnedAt?: string | null;
+  pinGroupId?: string | null;
   labels?: string[];
 }): PersistedWorkspaceRecord {
+  const pinGroupId = input.pinGroupId ?? (input.pinnedAt ? DEFAULT_WORKSPACE_PIN_GROUP_ID : null);
+  const pinnedAt = pinGroupId === DEFAULT_WORKSPACE_PIN_GROUP_ID ? (input.pinnedAt ?? null) : null;
   return PersistedWorkspaceRecordSchema.parse({
     ...input,
     title: input.title ?? null,
@@ -685,7 +1013,8 @@ export function createPersistedWorkspaceRecord(input: {
     mainRepoRoot: input.mainRepoRoot ?? null,
     archivedAt: input.archivedAt ?? null,
     autoArchivedChangeRequestUrl: input.autoArchivedChangeRequestUrl ?? null,
-    pinnedAt: input.pinnedAt ?? null,
+    pinnedAt,
+    pinGroupId,
   });
 }
 

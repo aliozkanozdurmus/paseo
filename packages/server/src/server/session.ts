@@ -137,6 +137,7 @@ import {
 } from "./workspace-registry-model.js";
 import { resolveWorkspaceIdForPath } from "./resolve-workspace-id-for-path.js";
 import {
+  DEFAULT_WORKSPACE_PIN_GROUP_ID,
   resolveProjectDisplayName,
   resolveWorkspaceDisplayName,
   resolveWorkspaceName,
@@ -1949,7 +1950,7 @@ export class Session {
       this.dispatchAgentConfigMessage(msg) ??
       this.dispatchCheckoutMessage(msg) ??
       this.dispatchWorkspaceRecoveryMessage(msg) ??
-      this.dispatchWorkspaceLabelMessage(msg) ??
+      this.dispatchWorkspaceCatalogMessage(msg) ??
       this.dispatchWorkspaceAndProjectMessage(msg) ??
       this.dispatchWorkspaceFileMessage(msg, source) ??
       this.dispatchProviderMessage(msg) ??
@@ -2500,7 +2501,27 @@ export class Session {
       case "workspace.title.set.request":
         return this.handleWorkspaceTitleSetRequest(msg.workspaceId, msg.title, msg.requestId);
       case "workspace.pin.set.request":
-        return this.handleWorkspacePinSetRequest(msg.workspaceId, msg.pinned, msg.requestId);
+        return this.handleWorkspacePinSetRequest(
+          msg.workspaceId,
+          msg.pinned,
+          msg.groupId,
+          msg.requestId,
+        );
+      default:
+        return undefined;
+    }
+  }
+
+  private dispatchWorkspacePinGroupMessage(msg: SessionInboundMessage): Promise<void> | undefined {
+    switch (msg.type) {
+      case "workspace.pin_group.list.request":
+        return this.handleWorkspacePinGroupListRequest(msg.requestId);
+      case "workspace.pin_group.create.request":
+        return this.handleWorkspacePinGroupCreateRequest(msg.name, msg.requestId);
+      case "workspace.pin_group.rename.request":
+        return this.handleWorkspacePinGroupRenameRequest(msg.groupId, msg.name, msg.requestId);
+      case "workspace.pin_group.delete.request":
+        return this.handleWorkspacePinGroupDeleteRequest(msg.groupId, msg.requestId);
       default:
         return undefined;
     }
@@ -2521,6 +2542,10 @@ export class Session {
       default:
         return undefined;
     }
+  }
+
+  private dispatchWorkspaceCatalogMessage(msg: SessionInboundMessage): Promise<void> | undefined {
+    return this.dispatchWorkspaceLabelMessage(msg) ?? this.dispatchWorkspacePinGroupMessage(msg);
   }
 
   private dispatchWorkspaceFileMessage(
@@ -3323,30 +3348,46 @@ export class Session {
   private async handleWorkspacePinSetRequest(
     workspaceId: string,
     pinned: boolean,
+    groupId: string | undefined,
     requestId: string,
   ): Promise<void> {
-    const logContext = { workspaceId, pinned, requestId };
+    const resolvedGroupId = pinned ? (groupId ?? DEFAULT_WORKSPACE_PIN_GROUP_ID) : null;
+    const logContext = { workspaceId, pinned, groupId: resolvedGroupId, requestId };
     this.sessionLogger.info(logContext, "session: workspace.pin.set.request");
-    const emitResponse = (accepted: boolean, pinnedAt: string | null, error: string | null) => {
+    const emitResponse = (input: {
+      accepted: boolean;
+      pinnedAt: string | null;
+      groupId: string | null;
+      error: string | null;
+    }) => {
       this.emit({
         type: "workspace.pin.set.response",
-        payload: { requestId, workspaceId, accepted, pinnedAt, error },
+        payload: { requestId, workspaceId, ...input },
       });
     };
 
     try {
-      const nextPinnedAt = pinned ? new Date().toISOString() : null;
       const updatedAt = new Date().toISOString();
-      const updated = await this.workspaceRegistry.update(workspaceId, (existing) => ({
-        ...existing,
-        pinnedAt: nextPinnedAt,
+      const updated = await this.workspaceRegistry.setWorkspacePinGroup({
+        workspaceId,
+        groupId: resolvedGroupId,
         updatedAt,
-      }));
+      });
       if (!updated) {
-        emitResponse(false, null, "Workspace not found");
+        emitResponse({
+          accepted: false,
+          pinnedAt: null,
+          groupId: null,
+          error: "Workspace not found",
+        });
         return;
       }
-      emitResponse(true, nextPinnedAt, null);
+      emitResponse({
+        accepted: true,
+        pinnedAt: updated.pinnedAt,
+        groupId: updated.pinGroupId,
+        error: null,
+      });
       await this.emitWorkspaceUpdatesForWorkspaceIds([workspaceId]);
     } catch (error) {
       this.sessionLogger.error(
@@ -3362,8 +3403,56 @@ export class Session {
           content: `Failed to pin workspace: ${getErrorMessage(error)}`,
         },
       });
-      emitResponse(false, null, getErrorMessageOr(error, "Failed to pin workspace"));
+      emitResponse({
+        accepted: false,
+        pinnedAt: null,
+        groupId: null,
+        error: getErrorMessageOr(error, "Failed to pin workspace"),
+      });
     }
+  }
+
+  private async handleWorkspacePinGroupListRequest(requestId: string): Promise<void> {
+    const groups = await this.workspaceRegistry.listPinGroups();
+    this.emit({
+      type: "workspace.pin_group.list.response",
+      payload: { requestId, groups },
+    });
+  }
+
+  private async handleWorkspacePinGroupCreateRequest(
+    name: string,
+    requestId: string,
+  ): Promise<void> {
+    const group = await this.workspaceRegistry.createPinGroup(name);
+    this.emit({
+      type: "workspace.pin_group.create.response",
+      payload: { requestId, group },
+    });
+  }
+
+  private async handleWorkspacePinGroupRenameRequest(
+    groupId: string,
+    name: string,
+    requestId: string,
+  ): Promise<void> {
+    const group = await this.workspaceRegistry.renamePinGroup(groupId, name);
+    this.emit({
+      type: "workspace.pin_group.rename.response",
+      payload: { requestId, group },
+    });
+  }
+
+  private async handleWorkspacePinGroupDeleteRequest(
+    groupId: string,
+    requestId: string,
+  ): Promise<void> {
+    const unpinnedWorkspaceIds = await this.workspaceRegistry.deletePinGroup(groupId);
+    this.emit({
+      type: "workspace.pin_group.delete.response",
+      payload: { requestId, groupId },
+    });
+    await this.emitWorkspaceUpdatesForWorkspaceIds(unpinnedWorkspaceIds);
   }
 
   private async handleWorkspaceRecoveryInspectRequest(
@@ -4875,6 +4964,7 @@ export class Session {
       name: resolveWorkspaceDisplayName(workspace),
       title: workspace.title,
       pinnedAt: workspace.pinnedAt,
+      pinGroupId: workspace.pinGroupId,
       ...(workspace.labels && workspace.labels.length > 0 ? { labels: workspace.labels } : {}),
       archivingAt: null,
       status: "done",
@@ -4967,6 +5057,7 @@ export class Session {
       }),
       title: result.workspace.title,
       pinnedAt: result.workspace.pinnedAt,
+      pinGroupId: result.workspace.pinGroupId,
       ...(result.workspace.labels && result.workspace.labels.length > 0
         ? { labels: result.workspace.labels }
         : {}),

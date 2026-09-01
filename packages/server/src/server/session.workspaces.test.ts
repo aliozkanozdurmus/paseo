@@ -68,6 +68,7 @@ import {
 import {
   FileBackedProjectRegistry,
   FileBackedWorkspaceRegistry,
+  DEFAULT_WORKSPACE_PIN_GROUP_ID,
   createPersistedProjectRecord,
   createPersistedWorkspaceRecord,
   type PersistedProjectRecord,
@@ -140,6 +141,15 @@ interface SessionTestAccess {
       updater: (record: PersistedWorkspaceRecord) => PersistedWorkspaceRecord,
     ): Promise<unknown>;
     upsert(record: unknown): Promise<unknown>;
+    listPinGroups(): Promise<unknown[]>;
+    createPinGroup(name: string): Promise<unknown>;
+    renamePinGroup(groupId: string, name: string): Promise<unknown>;
+    deletePinGroup(groupId: string): Promise<string[]>;
+    setWorkspacePinGroup(input: {
+      workspaceId: string;
+      groupId: string | null;
+      updatedAt: string;
+    }): Promise<unknown>;
   };
   agentUpdates: AgentUpdatesService;
   workspaceUpdatesSubscription: unknown;
@@ -543,6 +553,7 @@ class CreateAgentTestClient implements AgentClient {
 
 function createSessionForWorkspaceTests(
   options: {
+    permissions?: SessionOptions["permissions"];
     appVersion?: string | null;
     onMessage?: (message: SessionOutboundMessage) => void;
     onWorkspaceRecovered?: SessionOptions["onWorkspaceRecovered"];
@@ -627,6 +638,25 @@ function createSessionForWorkspaceTests(
     upsert: async () => {},
     archive: async () => {},
     remove: async () => {},
+    listPinGroups: async () => [
+      {
+        id: DEFAULT_WORKSPACE_PIN_GROUP_ID,
+        name: "Pinned",
+        createdAt: "2026-03-01T12:00:00.000Z",
+      },
+    ],
+    createPinGroup: async (name) => ({
+      id: "pgrp-test",
+      name,
+      createdAt: "2026-03-01T12:00:00.000Z",
+    }),
+    renamePinGroup: async (groupId, name) => ({
+      id: groupId,
+      name,
+      createdAt: "2026-03-01T12:00:00.000Z",
+    }),
+    deletePinGroup: async () => [],
+    setWorkspacePinGroup: async () => null,
   };
   const workspaceGitService = options.workspaceGitService ?? createNoopWorkspaceGitService();
   const providerSnapshotManager = createProviderSnapshotManagerStub().manager;
@@ -634,7 +664,7 @@ function createSessionForWorkspaceTests(
   const session = asTestSession(
     new Session({
       clientId: "test-client",
-      permissions: OWNER_PERMISSIONS,
+      permissions: options.permissions ?? OWNER_PERMISSIONS,
       appVersion: options.appVersion ?? null,
       onMessage: options.onMessage ?? vi.fn(),
       onWorkspaceRecovered: options.onWorkspaceRecovered,
@@ -8103,7 +8133,6 @@ test("workspace.title.set.request stores the title and emits an updated descript
     workspaces.set(id, updated);
     return updated;
   };
-
   session.workspaceUpdatesSubscription = {
     subscriptionId: "sub-workspaces",
     filter: {},
@@ -8174,6 +8203,18 @@ test("workspace.pin.set.request stores the pin timestamp and emits an updated de
     workspaces.set(id, updated);
     return updated;
   };
+  session.workspaceRegistry.setWorkspacePinGroup = async (input) => {
+    const existing = workspaces.get(input.workspaceId);
+    if (!existing) return null;
+    const updated = {
+      ...existing,
+      pinGroupId: input.groupId,
+      pinnedAt: input.groupId === DEFAULT_WORKSPACE_PIN_GROUP_ID ? input.updatedAt : null,
+      updatedAt: input.updatedAt,
+    };
+    workspaces.set(input.workspaceId, updated);
+    return updated;
+  };
   session.workspaceUpdatesSubscription = {
     subscriptionId: "sub-workspaces",
     filter: {},
@@ -8194,6 +8235,7 @@ test("workspace.pin.set.request stores the pin timestamp and emits an updated de
     requestId: "req-pin-1",
     workspaceId: "ws-1",
     accepted: true,
+    groupId: DEFAULT_WORKSPACE_PIN_GROUP_ID,
     error: null,
   });
   expect(response?.payload.pinnedAt).toEqual(expect.any(String));
@@ -8203,8 +8245,106 @@ test("workspace.pin.set.request stores the pin timestamp and emits an updated de
     workspace: {
       id: "ws-1",
       pinnedAt: response?.payload.pinnedAt,
+      pinGroupId: DEFAULT_WORKSPACE_PIN_GROUP_ID,
     },
   });
+});
+
+test("workspace pin group RPCs list, create, rename, and delete daemon-shared groups", async () => {
+  const emitted: SessionOutboundMessage[] = [];
+  const session = asTestSession(
+    createSessionForWorkspaceTests({ onMessage: (message) => emitted.push(message) }),
+  );
+  const defaultGroup = {
+    id: DEFAULT_WORKSPACE_PIN_GROUP_ID,
+    name: "Pinned",
+    createdAt: "2026-08-31T12:00:00.000Z",
+  };
+  const focusGroup = {
+    id: "pgrp-focus",
+    name: "Focus",
+    createdAt: "2026-08-31T12:01:00.000Z",
+  };
+  session.workspaceRegistry.listPinGroups = async () => [defaultGroup];
+  session.workspaceRegistry.createPinGroup = async () => focusGroup;
+  session.workspaceRegistry.renamePinGroup = async () => ({ ...focusGroup, name: "This week" });
+  session.workspaceRegistry.deletePinGroup = async () => ["ws-1"];
+  session.emitWorkspaceUpdatesForWorkspaceIds = vi.fn(async () => {});
+
+  await session.handleMessage({
+    type: "workspace.pin_group.list.request",
+    requestId: "req-list",
+  });
+  await session.handleMessage({
+    type: "workspace.pin_group.create.request",
+    name: "Focus",
+    requestId: "req-create",
+  });
+  await session.handleMessage({
+    type: "workspace.pin_group.rename.request",
+    groupId: focusGroup.id,
+    name: "This week",
+    requestId: "req-rename",
+  });
+  await session.handleMessage({
+    type: "workspace.pin_group.delete.request",
+    groupId: focusGroup.id,
+    requestId: "req-delete",
+  });
+
+  expect(findByType(emitted, "workspace.pin_group.list.response")?.payload).toEqual({
+    requestId: "req-list",
+    groups: [defaultGroup],
+  });
+  expect(findByType(emitted, "workspace.pin_group.create.response")?.payload).toEqual({
+    requestId: "req-create",
+    group: focusGroup,
+  });
+  expect(findByType(emitted, "workspace.pin_group.rename.response")?.payload).toEqual({
+    requestId: "req-rename",
+    group: { ...focusGroup, name: "This week" },
+  });
+  expect(findByType(emitted, "workspace.pin_group.delete.response")?.payload).toEqual({
+    requestId: "req-delete",
+    groupId: focusGroup.id,
+  });
+  expect(session.emitWorkspaceUpdatesForWorkspaceIds).toHaveBeenCalledWith(["ws-1"]);
+});
+
+test("workspace pin group RPC permissions allow reads and reject mutations without manage", async () => {
+  const emitted: SessionOutboundMessage[] = [];
+  const session = asTestSession(
+    createSessionForWorkspaceTests({
+      permissions: ["workspace.read"],
+      onMessage: (message) => emitted.push(message),
+    }),
+  );
+  const createPinGroup = vi.fn(async () => ({
+    id: "pgrp-focus",
+    name: "Focus",
+    createdAt: "2026-08-31T12:00:00.000Z",
+  }));
+  session.workspaceRegistry.listPinGroups = async () => [];
+  session.workspaceRegistry.createPinGroup = createPinGroup;
+
+  await session.handleMessage({
+    type: "workspace.pin_group.list.request",
+    requestId: "req-list-read-only",
+  });
+  await session.handleMessage({
+    type: "workspace.pin_group.create.request",
+    name: "Focus",
+    requestId: "req-create-read-only",
+  });
+
+  expect(findByType(emitted, "workspace.pin_group.list.response")?.payload.groups).toEqual([]);
+  expect(findByType(emitted, "rpc_error")?.payload).toEqual({
+    requestId: "req-create-read-only",
+    requestType: "workspace.pin_group.create.request",
+    error: "Session is not authorized for workspace.pin_group.create.request",
+    code: "access_denied",
+  });
+  expect(createPinGroup).not.toHaveBeenCalled();
 });
 
 test("workspace.title.set.request with whitespace-only title clears the title", async () => {
