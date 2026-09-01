@@ -452,12 +452,15 @@ migration.
 
 The versioned transaction journal stores raw before-images and hashes for every file. Prepared
 recovery rolls back only files matching a known before- or after-image; any third state blocks
-startup so a downgrade write cannot be overwritten. Committed recovery validates and replays
-missing known after-images before deleting the journal. Unknown newer sidecar and journal format
-versions block startup without rewriting their bytes. These atomic rename and journal guarantees
-cover process crashes. They do not promise recovery from power loss because the atomic writer does
-not fsync file and directory entries. A malformed primary file or sidecar blocks initialization
-and remains byte-for-byte untouched. A workspace is a specific working directory within a project.
+startup with file-specific recovery steps so a downgrade write cannot be overwritten. Committed
+recovery preserves a later primary write, repairs only the sidecar artifacts from its after-images,
+then lets primary-hash reconciliation converge the generation. A missing primary with any
+established sidecar, backup, or marker blocks startup until you restore the primary or explicitly
+reset the pin-group artifacts. Unknown newer sidecar and journal format versions block startup
+without rewriting their bytes. These atomic rename and journal guarantees cover process crashes.
+They do not promise recovery from power loss because the atomic writer does not fsync file and
+directory entries. A malformed primary file or sidecar blocks initialization and remains
+byte-for-byte untouched. A workspace is a specific working directory within a project.
 
 | Field                          | Type                                            | Description                                                                                                                                                                                   |
 | ------------------------------ | ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

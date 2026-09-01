@@ -195,6 +195,13 @@ export class WorkspacePinGroupError extends Error {
   }
 }
 
+export class WorkspaceRegistryIntegrityError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "WorkspaceRegistryIntegrityError";
+  }
+}
+
 function normalizePinGroupName(name: string): string {
   const normalized = name.trim();
   if (!normalized) {
@@ -1150,6 +1157,21 @@ export class FileBackedWorkspaceRegistry
   private async loadPinGroupState(): Promise<void> {
     await this.recoverPinGroupTransaction();
     const primaryBeforeLoad = await this.readRawFileBeforeImage(this.registryFilePath);
+    if (!primaryBeforeLoad.exists) {
+      const establishedArtifacts = await Promise.all(
+        [this.pinGroupsFilePath, this.pinGroupsBackupFilePath, this.pinGroupsMarkerFilePath].map(
+          async (filePath) => ({
+            filePath,
+            contents: await this.readOptionalRawFile(filePath),
+          }),
+        ),
+      );
+      if (establishedArtifacts.some((artifact) => artifact.contents !== null)) {
+        throw new WorkspaceRegistryIntegrityError(
+          `Workspace registry is missing at ${this.registryFilePath} while established pin-group storage exists at ${this.pinGroupsFilePath}, ${this.pinGroupsBackupFilePath}, or ${this.pinGroupsMarkerFilePath}. Refusing to discard stored memberships. Restore ${this.registryFilePath} from backup and restart the daemon. To intentionally reset all workspace pin groups, first inspect and back up ${this.pinGroupsFilePath} and ${this.pinGroupsBackupFilePath}, then delete those files and ${this.pinGroupsMarkerFilePath} before restarting.`,
+        );
+      }
+    }
     const primaryContentHash = primaryBeforeLoad.contentHash;
     await super.initialize();
     const workspaces = await super.list();
@@ -1373,8 +1395,11 @@ export class FileBackedWorkspaceRegistry
     const files = await this.readPinGroupTransactionFileStates(transaction);
     for (const file of files) {
       if (!this.rawFileImageMatches(file.current, file.before) && !file.currentMatchesAfter) {
-        throw new Error(
-          `Workspace pin-group prepared transaction conflicts with a newer ${file.label} file; refusing to overwrite it`,
+        const restoreStep = file.before.exists
+          ? `restore ${file.filePath} from a verified copy with SHA-256 ${file.before.contentHash}`
+          : `delete the newer file at ${file.filePath}`;
+        throw new WorkspaceRegistryIntegrityError(
+          `Workspace pin-group prepared transaction conflicts with a newer ${file.label} file. Conflicting file: ${file.filePath}. Primary registry: ${this.registryFilePath}. Journal: ${this.pinGroupsTransactionFilePath}. Refusing to overwrite current data. Recovery: inspect the primary registry and journal; delete the journal at ${this.pinGroupsTransactionFilePath} to keep the current registry, or ${restoreStep}, then delete the journal and restart the daemon.`,
         );
       }
     }
@@ -1389,19 +1414,32 @@ export class FileBackedWorkspaceRegistry
   private async replayCommittedPinGroupTransaction(
     transaction: PersistedWorkspacePinGroupsTransaction,
   ): Promise<void> {
-    const files = await this.readPinGroupTransactionFileStates(transaction);
-    for (const file of files) {
+    const [primary, ...auxiliary] = await this.readPinGroupTransactionFileStates(transaction);
+    if (!primary) {
+      throw new WorkspaceRegistryIntegrityError(
+        `Workspace pin-group committed transaction at ${this.pinGroupsTransactionFilePath} has no primary registry state. Inspect the journal and restore ${this.registryFilePath} from backup before restarting the daemon.`,
+      );
+    }
+    const primaryHasLaterWrite =
+      primary.current.exists &&
+      !primary.currentMatchesAfter &&
+      !this.rawFileImageMatches(primary.current, primary.before);
+    const filesToReplay = primaryHasLaterWrite ? auxiliary : [primary, ...auxiliary];
+    for (const file of filesToReplay) {
       if (
         file.current.exists &&
         !file.currentMatchesAfter &&
         !this.rawFileImageMatches(file.current, file.before)
       ) {
-        throw new Error(
-          `Workspace pin-group committed transaction conflicts with a newer ${file.label} file; refusing to overwrite it`,
+        const restoreStep = file.before.exists
+          ? `restore ${file.filePath} from a verified copy with SHA-256 ${file.before.contentHash}`
+          : `delete the newer file at ${file.filePath}`;
+        throw new WorkspaceRegistryIntegrityError(
+          `Workspace pin-group committed transaction conflicts with the current ${file.label}. Conflicting file: ${file.filePath}. Primary registry: ${this.registryFilePath}. Journal: ${this.pinGroupsTransactionFilePath}. Refusing to overwrite current data. Recovery: inspect the primary registry and journal; ${restoreStep}, then delete the journal at ${this.pinGroupsTransactionFilePath} and restart the daemon.`,
         );
       }
     }
-    for (const file of files) {
+    for (const file of filesToReplay) {
       if (!file.currentMatchesAfter) {
         await this.writeRawFile(file.filePath, file.afterContents);
       }

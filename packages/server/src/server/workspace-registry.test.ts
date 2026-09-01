@@ -23,6 +23,7 @@ import {
   FileBackedProjectRegistry,
   FileBackedWorkspaceRegistry,
   DEFAULT_WORKSPACE_PIN_GROUP_ID,
+  WorkspaceRegistryIntegrityError,
   resolveWorkspaceDisplayName,
   resolveWorkspaceName,
 } from "./workspace-registry.js";
@@ -844,6 +845,68 @@ describe("workspace registries", () => {
     expect(readFileSync(sidecarPath, "utf8")).toBe(corruptSidecarBytes);
   });
 
+  test("blocks a missing primary before established pin-group memberships can be discarded", async () => {
+    const filePath = path.join(tmpDir, "projects", "missing-primary-workspaces.json");
+    const sidecarPath = path.join(tmpDir, "projects", "missing-primary-workspaces.pin-groups.json");
+    const backupPath = path.join(
+      tmpDir,
+      "projects",
+      "missing-primary-workspaces.pin-groups.backup.json",
+    );
+    const markerPath = path.join(
+      tmpDir,
+      "projects",
+      "missing-primary-workspaces.pin-groups.expected.json",
+    );
+    const registry = new FileBackedWorkspaceRegistry(filePath, logger, {
+      pinGroupIdFactory: () => "pgrp_preserved",
+      now: () => "2026-08-31T12:00:00.000Z",
+    });
+    await registry.initialize();
+    const group = await registry.createPinGroup("Preserved");
+    await registry.upsert(
+      createPersistedWorkspaceRecord({
+        workspaceId: "ws-preserved",
+        projectId: "proj-1",
+        cwd: "/tmp/preserved",
+        kind: "directory",
+        displayName: "preserved",
+        createdAt: "2026-08-31T12:00:00.000Z",
+        updatedAt: "2026-08-31T12:00:00.000Z",
+      }),
+    );
+    await registry.setWorkspacePinGroup({
+      workspaceId: "ws-preserved",
+      groupId: group.id,
+      updatedAt: "2026-08-31T13:00:00.000Z",
+    });
+    const sidecarBytes = readFileSync(sidecarPath, "utf8");
+    const backupBytes = readFileSync(backupPath, "utf8");
+    const markerBytes = readFileSync(markerPath, "utf8");
+    rmSync(filePath);
+
+    const reloaded = new FileBackedWorkspaceRegistry(filePath, logger);
+    const failure = await reloaded.initialize().catch((cause: unknown) => cause);
+
+    expect(failure).toBeInstanceOf(WorkspaceRegistryIntegrityError);
+    expect(failure).toBeInstanceOf(Error);
+    const message = (failure as Error).message;
+    for (const expectedPath of [filePath, sidecarPath, backupPath, markerPath]) {
+      expect(message).toContain(expectedPath);
+    }
+    expect(message).toContain(`Restore ${filePath} from backup and restart the daemon`);
+    expect(message).toContain("To intentionally reset all workspace pin groups");
+    expect(existsSync(filePath)).toBe(false);
+    expect(readFileSync(sidecarPath, "utf8")).toBe(sidecarBytes);
+    expect(readFileSync(backupPath, "utf8")).toBe(backupBytes);
+    expect(readFileSync(markerPath, "utf8")).toBe(markerBytes);
+    expect(JSON.parse(sidecarBytes)).toMatchObject({
+      memberships: {
+        "ws-preserved": { groupId: group.id, assignedAt: "2026-08-31T13:00:00.000Z" },
+      },
+    });
+  });
+
   test("restores an expected missing sidecar from its committed backup", async () => {
     const filePath = path.join(tmpDir, "projects", "missing-sidecar-workspaces.json");
     const sidecarPath = path.join(tmpDir, "projects", "missing-sidecar-workspaces.pin-groups.json");
@@ -1001,9 +1064,14 @@ describe("workspace registries", () => {
     writeFileSync(filePath, newerPrimaryBytes);
 
     const reloaded = new FileBackedWorkspaceRegistry(filePath, logger);
-    await expect(reloaded.initialize()).rejects.toThrow(
-      "conflicts with a newer workspace registry file",
-    );
+    const failure = await reloaded.initialize().catch((cause: unknown) => cause);
+    expect(failure).toBeInstanceOf(WorkspaceRegistryIntegrityError);
+    expect(failure).toBeInstanceOf(Error);
+    const message = (failure as Error).message;
+    expect(message).toContain(filePath);
+    expect(message).toContain(transactionPath);
+    expect(message).toContain(`delete the journal at ${transactionPath}`);
+    expect(message).toContain(`restore ${filePath} from a verified copy`);
     expect(readFileSync(filePath, "utf8")).toBe(newerPrimaryBytes);
     expect(readFileSync(sidecarPath, "utf8")).toBe(beforeSidecarBytes);
     expect(readFileSync(backupPath, "utf8")).toBe(beforeBackupBytes);
@@ -1247,6 +1315,87 @@ describe("workspace registries", () => {
     expect(readFileSync(backupPath, "utf8")).toBe(afterSidecarBytes);
     expect(await reloaded.get("ws-committed")).toMatchObject({ workspaceId: "ws-committed" });
     expect(existsSync(markerPath)).toBe(true);
+    expect(existsSync(transactionPath)).toBe(false);
+  });
+
+  test("preserves a later downgrade write while completing committed journal recovery", async () => {
+    const filePath = path.join(tmpDir, "projects", "workspaces.json");
+    const sidecarPath = path.join(tmpDir, "projects", "workspace-pin-groups.json");
+    const backupPath = path.join(tmpDir, "projects", "workspace-pin-groups.backup.json");
+    const markerPath = path.join(tmpDir, "projects", "workspace-pin-groups.expected.json");
+    const transactionPath = path.join(tmpDir, "projects", "workspace-pin-groups.transaction.json");
+    const baseline = new FileBackedWorkspaceRegistry(filePath, logger, {
+      pinGroupIdFactory: () => "pgrp_focus",
+      now: () => "2026-08-31T12:00:00.000Z",
+    });
+    await baseline.initialize();
+    await baseline.upsert(
+      createPersistedWorkspaceRecord({
+        workspaceId: "ws-survives-downgrade",
+        projectId: "proj-1",
+        cwd: "/tmp/committed-downgrade",
+        kind: "directory",
+        displayName: "before downgrade",
+        createdAt: "2026-08-31T12:00:00.000Z",
+        updatedAt: "2026-08-31T12:00:00.000Z",
+      }),
+    );
+    const focus = await baseline.createPinGroup("Focus");
+    const beforeWorkspaceBytes = readFileSync(filePath, "utf8");
+    const beforeSidecarBytes = readFileSync(sidecarPath, "utf8");
+    const beforeBackupBytes = readFileSync(backupPath, "utf8");
+    const beforeMarkerBytes = readFileSync(markerPath, "utf8");
+    await baseline.setWorkspacePinGroup({
+      workspaceId: "ws-survives-downgrade",
+      groupId: focus.id,
+      updatedAt: "2026-08-31T13:00:00.000Z",
+    });
+    const afterWorkspaceBytes = readFileSync(filePath, "utf8");
+    const afterSidecarBytes = readFileSync(sidecarPath, "utf8");
+    writeFileSync(
+      transactionPath,
+      serializedJson(
+        pinGroupTransaction({
+          phase: "committed",
+          beforeWorkspaces: beforeWorkspaceBytes,
+          afterWorkspaces: JSON.parse(afterWorkspaceBytes),
+          beforePinGroups: beforeSidecarBytes,
+          afterPinGroups: JSON.parse(afterSidecarBytes),
+          beforePinGroupsBackup: beforeBackupBytes,
+          beforeMarker: beforeMarkerBytes,
+        }),
+      ),
+    );
+
+    runBaselineWorkspaceUpdate({ sandboxRoot: tmpDir, workspaceFilePath: filePath });
+
+    const reupgraded = new FileBackedWorkspaceRegistry(filePath, logger);
+    await reupgraded.initialize();
+
+    expect(await reupgraded.get("ws-survives-downgrade")).toMatchObject({
+      displayName: "renamed by ecec33265",
+      title: "Legacy title",
+      updatedAt: "2026-08-31T14:00:00.000Z",
+      pinGroupId: focus.id,
+      pinGroupAssignedAt: "2026-08-31T13:00:00.000Z",
+      pinnedAt: null,
+    });
+    expect((await reupgraded.listPinGroups()).map((group) => group.id)).toEqual([
+      DEFAULT_WORKSPACE_PIN_GROUP_ID,
+      focus.id,
+    ]);
+    const finalPrimaryBytes = readFileSync(filePath, "utf8");
+    const finalSidecarBytes = readFileSync(sidecarPath, "utf8");
+    expect(readFileSync(backupPath, "utf8")).toBe(finalSidecarBytes);
+    expect(JSON.parse(finalSidecarBytes)).toMatchObject({
+      primaryContentHash: fileHash(finalPrimaryBytes),
+      memberships: {
+        "ws-survives-downgrade": {
+          groupId: focus.id,
+          assignedAt: "2026-08-31T13:00:00.000Z",
+        },
+      },
+    });
     expect(existsSync(transactionPath)).toBe(false);
   });
 
