@@ -46,6 +46,30 @@ function beforeImage(contents: string | null) {
     : { exists: true as const, contents, contentHash: fileHash(contents) };
 }
 
+function snapshotFileBytes(filePaths: readonly string[]): Map<string, string> {
+  return new Map(filePaths.map((filePath) => [filePath, readFileSync(filePath, "utf8")]));
+}
+
+function expectFileBytesUnchanged(snapshot: ReadonlyMap<string, string>): void {
+  for (const [filePath, contents] of snapshot) {
+    expect(readFileSync(filePath, "utf8")).toBe(contents);
+  }
+}
+
+function expectJournalIntegrityRecovery(
+  failure: unknown,
+  journalPath: string,
+  snapshotPaths: readonly string[],
+): void {
+  expect(failure).toBeInstanceOf(WorkspaceRegistryIntegrityError);
+  expect(failure).toBeInstanceOf(Error);
+  const message = (failure as Error).message;
+  expect(message).toContain(journalPath);
+  expect(message).toContain("Recover only as a complete snapshot");
+  for (const filePath of snapshotPaths) expect(message).toContain(filePath);
+  expect(message).toContain(`delete ${journalPath} and restart the daemon`);
+}
+
 function pinGroupTransaction(input: {
   phase: "prepared" | "committed";
   beforeWorkspaces: string | null;
@@ -1002,11 +1026,85 @@ describe("workspace registries", () => {
     writeFileSync(transactionPath, futureJournalBytes);
 
     const reloaded = new FileBackedWorkspaceRegistry(filePath, logger);
-    await expect(reloaded.initialize()).rejects.toThrow(
+    const failure = await reloaded.initialize().catch((cause: unknown) => cause);
+    expect(failure).toBeInstanceOf(WorkspaceRegistryIntegrityError);
+    expect((failure as Error).message).toContain(
       "Unsupported workspace pin-group transaction formatVersion 2",
     );
     expect(readFileSync(filePath, "utf8")).toBe(workspaceBytes);
     expect(readFileSync(transactionPath, "utf8")).toBe(futureJournalBytes);
+  });
+
+  test("blocks a malformed transaction journal with complete-snapshot recovery steps", async () => {
+    const projectsPath = path.join(tmpDir, "projects");
+    const filePath = path.join(projectsPath, "workspaces.json");
+    const sidecarPath = path.join(projectsPath, "workspace-pin-groups.json");
+    const backupPath = path.join(projectsPath, "workspace-pin-groups.backup.json");
+    const markerPath = path.join(projectsPath, "workspace-pin-groups.expected.json");
+    const transactionPath = path.join(projectsPath, "workspace-pin-groups.transaction.json");
+    const registry = new FileBackedWorkspaceRegistry(filePath, logger);
+    await registry.initialize();
+    writeFileSync(transactionPath, "CORRUPT_TRANSACTION_JOURNAL");
+    const artifactPaths = [filePath, sidecarPath, backupPath, markerPath, transactionPath];
+    const untouched = snapshotFileBytes(artifactPaths);
+
+    const reloaded = new FileBackedWorkspaceRegistry(filePath, logger);
+    const failure = await reloaded.initialize().catch((cause: unknown) => cause);
+
+    expectJournalIntegrityRecovery(failure, transactionPath, artifactPaths.slice(0, 4));
+    expectFileBytesUnchanged(untouched);
+  });
+
+  test("blocks an EACCES transaction read as a registry integrity failure", async () => {
+    const projectsPath = path.join(tmpDir, "projects");
+    const filePath = path.join(projectsPath, "workspaces.json");
+    const sidecarPath = path.join(projectsPath, "workspace-pin-groups.json");
+    const backupPath = path.join(projectsPath, "workspace-pin-groups.backup.json");
+    const markerPath = path.join(projectsPath, "workspace-pin-groups.expected.json");
+    const transactionPath = path.join(projectsPath, "workspace-pin-groups.transaction.json");
+    const registry = new FileBackedWorkspaceRegistry(filePath, logger);
+    await registry.initialize();
+    writeFileSync(transactionPath, "UNREADABLE_TRANSACTION_JOURNAL");
+    const artifactPaths = [filePath, sidecarPath, backupPath, markerPath, transactionPath];
+    const untouched = snapshotFileBytes(artifactPaths);
+    const permissionError = Object.assign(new Error("permission denied"), { code: "EACCES" });
+
+    const reloaded = new FileBackedWorkspaceRegistry(filePath, logger, {
+      readPinGroupsTransactionFile: async () => {
+        throw permissionError;
+      },
+    });
+    const failure = await reloaded.initialize().catch((cause: unknown) => cause);
+
+    expectJournalIntegrityRecovery(failure, transactionPath, artifactPaths.slice(0, 4));
+    expect((failure as Error).message).toContain("EACCES: permission denied");
+    expectFileBytesUnchanged(untouched);
+  });
+
+  test("keeps EAGAIN transaction reads on the ordinary retry path", async () => {
+    const projectsPath = path.join(tmpDir, "projects");
+    const filePath = path.join(projectsPath, "workspaces.json");
+    const sidecarPath = path.join(projectsPath, "workspace-pin-groups.json");
+    const backupPath = path.join(projectsPath, "workspace-pin-groups.backup.json");
+    const markerPath = path.join(projectsPath, "workspace-pin-groups.expected.json");
+    const transactionPath = path.join(projectsPath, "workspace-pin-groups.transaction.json");
+    const registry = new FileBackedWorkspaceRegistry(filePath, logger);
+    await registry.initialize();
+    writeFileSync(transactionPath, "TRANSIENT_TRANSACTION_JOURNAL");
+    const artifactPaths = [filePath, sidecarPath, backupPath, markerPath, transactionPath];
+    const untouched = snapshotFileBytes(artifactPaths);
+    const transientError = Object.assign(new Error("try again"), { code: "EAGAIN" });
+
+    const reloaded = new FileBackedWorkspaceRegistry(filePath, logger, {
+      readPinGroupsTransactionFile: async () => {
+        throw transientError;
+      },
+    });
+    const failure = await reloaded.initialize().catch((cause: unknown) => cause);
+
+    expect(failure).toBe(transientError);
+    expect(failure).not.toBeInstanceOf(WorkspaceRegistryIntegrityError);
+    expectFileBytesUnchanged(untouched);
   });
 
   test("converges a split prepared transaction around a newer legacy primary write", async () => {

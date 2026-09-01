@@ -458,10 +458,12 @@ later primary before changing any artifact. Unknown auxiliary states block start
 manual recovery must restore the complete pre-transaction snapshot before removing the journal. A
 missing primary with any established sidecar, backup, or marker blocks startup until you restore
 the primary or explicitly reset the pin-group artifacts. Unknown newer sidecar and journal format
-versions block startup without rewriting their bytes. These atomic rename and journal guarantees
-cover process crashes. They do not promise recovery from power loss because the atomic writer does
-not fsync file and directory entries. A malformed primary file or sidecar blocks initialization and
-remains byte-for-byte untouched. A workspace is a specific working directory within a project.
+versions, malformed or integrity-invalid journals, and permission-denied journal reads block startup
+as integrity failures without rewriting their bytes. Transient journal read failures stay on the
+ordinary retry path. These atomic rename and journal guarantees cover process crashes. They do not
+promise recovery from power loss because the atomic writer does not fsync file and directory
+entries. A malformed primary file or sidecar blocks initialization and remains byte-for-byte
+untouched. A workspace is a specific working directory within a project.
 
 | Field                          | Type                                            | Description                                                                                                                                                                                   |
 | ------------------------------ | ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

@@ -926,6 +926,7 @@ export class FileBackedWorkspaceRegistry
     filePath: string,
     transaction: PersistedWorkspacePinGroupsTransaction,
   ) => Promise<void>;
+  private readonly readPinGroupsTransactionFile: (filePath: string) => Promise<string>;
   private readonly writeRawFile: (filePath: string, contents: string) => Promise<void>;
   private initialized = false;
   private initializing: Promise<void> | null = null;
@@ -951,6 +952,7 @@ export class FileBackedWorkspaceRegistry
         filePath: string,
         transaction: PersistedWorkspacePinGroupsTransaction,
       ) => Promise<void>;
+      readPinGroupsTransactionFile?: (filePath: string) => Promise<string>;
       writeRawFile?: (filePath: string, contents: string) => Promise<void>;
       pinGroupIdFactory?: () => string;
       now?: () => string;
@@ -998,6 +1000,8 @@ export class FileBackedWorkspaceRegistry
     this.writeWorkspaceRecords = options?.writeRecords ?? writeJsonFileAtomic;
     this.writePinGroupsFile = options?.writePinGroupsFile ?? writeJsonFileAtomic;
     this.writePinGroupsTransaction = options?.writePinGroupsTransaction ?? writeJsonFileAtomic;
+    this.readPinGroupsTransactionFile =
+      options?.readPinGroupsTransactionFile ?? ((targetPath) => fs.readFile(targetPath, "utf8"));
     this.writeRawFile = options?.writeRawFile ?? writeFileAtomic;
     persistFiles = (records, pinGroups) => this.persistFiles(records, pinGroups);
   }
@@ -1345,17 +1349,34 @@ export class FileBackedWorkspaceRegistry
   }
 
   private async readPinGroupTransaction(): Promise<PersistedWorkspacePinGroupsTransaction | null> {
+    let raw: string;
     try {
-      const raw = await fs.readFile(this.pinGroupsTransactionFilePath, "utf8");
+      raw = await this.readPinGroupsTransactionFile(this.pinGroupsTransactionFilePath);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT") return null;
+      if (code === "EACCES" || code === "EPERM") {
+        throw this.pinGroupTransactionIntegrityError(error);
+      }
+      throw error;
+    }
+    try {
       const value: unknown = JSON.parse(raw);
       assertSupportedFormatVersion(value, "transaction");
       const transaction = WorkspacePinGroupsTransactionSchema.parse(value);
       this.assertPinGroupTransactionIntegrity(transaction);
       return transaction;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-      throw error;
+      throw this.pinGroupTransactionIntegrityError(error);
     }
+  }
+
+  private pinGroupTransactionIntegrityError(error: unknown): WorkspaceRegistryIntegrityError {
+    const code = (error as NodeJS.ErrnoException).code;
+    const cause = `${code ? `${code}: ` : ""}${error instanceof Error ? error.message : String(error)}`;
+    return new WorkspaceRegistryIntegrityError(
+      `Workspace pin-group transaction journal at ${this.pinGroupsTransactionFilePath} is corrupt or unreadable. Journal retained; no recovery writes were made. Recover only as a complete snapshot: restore ${this.registryFilePath}, ${this.pinGroupsFilePath}, ${this.pinGroupsBackupFilePath}, and ${this.pinGroupsMarkerFilePath} from the same verified generation. After all four files match that snapshot, delete ${this.pinGroupsTransactionFilePath} and restart the daemon. Cause: ${cause}`,
+    );
   }
 
   private assertPinGroupTransactionIntegrity(
