@@ -4,7 +4,9 @@ import { useSidebarWorkspacePinController } from "@/hooks/use-sidebar-workspace-
 import type { KeyboardActionId } from "@/keyboard/keyboard-action-dispatcher";
 import { useHostFeature } from "@/runtime/host-features";
 import { useActiveWorkspaceSelection } from "@/stores/navigation-active-workspace-store";
+import { useSidebarViewStore } from "@/stores/sidebar-view-store";
 import { useWorkspaceFields } from "@/stores/session-store-hooks";
+import { canWorkspaceUseActivePinGroup } from "@/workspace-pin-groups/menu-model";
 import { buildWorkspaceTabPersistenceKey } from "@/workspace-tabs/model";
 
 const WORKSPACE_PIN_ACTIONS: readonly KeyboardActionId[] = ["workspace.pin"];
@@ -32,7 +34,17 @@ export function useGlobalWorkspacePinAction() {
     pinnedAt: workspace.pinnedAt ?? null,
     pinGroupId: workspace.pinGroupId ?? null,
   }));
-  const canPin = useHostFeature(serverId, "workspacePinGroups");
+  const supportsPinGroups = useHostFeature(serverId, "workspacePinGroups");
+  const supportsLegacyPinning = useHostFeature(serverId, "workspacePinning");
+  const activePinGroupId = useSidebarViewStore((state) => state.activePinGroupId);
+  const activePinGroupServerId = useSidebarViewStore((state) => state.activePinGroupServerId);
+  const canPin = canWorkspaceUseActivePinGroup({
+    workspaceServerId: serverId,
+    supportsPinGroups,
+    supportsLegacyPinning,
+    activeGroupId: activePinGroupId,
+    activeGroupServerId: activePinGroupServerId,
+  });
   const togglePin = useSidebarWorkspacePinController();
 
   const handle = useCallback(() => {

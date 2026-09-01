@@ -79,7 +79,7 @@ async function fetchPinGroupId(workspace: SeededWorkspace): Promise<string | nul
     (entry) => entry.id === workspace.workspaceId,
   );
   if (!descriptor) throw new Error(`Workspace ${workspace.workspaceId} is missing from daemon`);
-  return (descriptor as typeof descriptor & { pinGroupId?: string | null }).pinGroupId ?? null;
+  return descriptor.pinGroupId ?? null;
 }
 
 test.describe("Workspace pin groups", () => {

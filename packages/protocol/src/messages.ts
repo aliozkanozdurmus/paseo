@@ -996,7 +996,6 @@ export const WorkspacePinSetRequestSchema = z.object({
   type: z.literal("workspace.pin.set.request"),
   workspaceId: z.string(),
   pinned: z.boolean(),
-  groupId: z.string().optional(),
   requestId: z.string(),
 });
 
@@ -1008,6 +1007,13 @@ export const WorkspacePinGroupSchema = z.object({
 
 export const WorkspacePinGroupListRequestSchema = z.object({
   type: z.literal("workspace.pin_group.list.request"),
+  requestId: z.string(),
+});
+
+export const WorkspacePinGroupSetMembershipRequestSchema = z.object({
+  type: z.literal("workspace.pin_group.set_membership.request"),
+  workspaceId: z.string(),
+  groupId: z.string().nullable(),
   requestId: z.string(),
 });
 
@@ -2017,7 +2023,6 @@ export const WorkspacePinSetResponsePayloadSchema = z.object({
   workspaceId: z.string(),
   accepted: z.boolean(),
   pinnedAt: z.string().nullable(),
-  groupId: z.string().nullable().optional(),
   error: z.string().nullable(),
 });
 
@@ -2031,6 +2036,15 @@ export const WorkspacePinGroupListResponseSchema = z.object({
   payload: z.object({
     requestId: z.string(),
     groups: z.array(WorkspacePinGroupSchema),
+  }),
+});
+
+export const WorkspacePinGroupSetMembershipResponseSchema = z.object({
+  type: z.literal("workspace.pin_group.set_membership.response"),
+  payload: z.object({
+    requestId: z.string(),
+    workspaceId: z.string(),
+    groupId: z.string().nullable(),
   }),
 });
 
@@ -3081,6 +3095,7 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   WorkspaceTitleSetRequestSchema,
   WorkspacePinSetRequestSchema,
   WorkspacePinGroupListRequestSchema,
+  WorkspacePinGroupSetMembershipRequestSchema,
   WorkspacePinGroupCreateRequestSchema,
   WorkspacePinGroupRenameRequestSchema,
   WorkspacePinGroupDeleteRequestSchema,
@@ -3430,6 +3445,7 @@ export const ServerInfoStatusPayloadSchema = z
         directorySync: z.boolean().optional(),
         // COMPAT(workspaceLabels): added in v0.5.0, remove after 2027-08-14.
         workspaceLabels: z.boolean().optional(),
+        // COMPAT(workspacePinGroups): added in v0.7.0, remove gate after 2027-03-01.
         workspacePinGroups: z.boolean().optional(),
         // COMPAT(checkoutForgeSetAutoMerge): added in v0.2.0-beta.1. Remove the
         // feature gate and checkoutGithubSetAutoMerge fallback after 2027-01-17
@@ -3859,6 +3875,7 @@ export const WorkspaceDescriptorPayloadSchema = z
     title: z.string().nullable().optional(),
     // COMPAT(workspacePinning): added in v0.1.107, remove optional after 2027-01-12.
     pinnedAt: z.string().nullable().optional(),
+    // COMPAT(workspacePinGroups): added in v0.7.0, remove optional after 2027-03-01.
     pinGroupId: z.string().nullable().optional(),
     // COMPAT(workspaceLabels): added in v0.5.0, remove optional after 2027-08-14.
     labels: z.array(z.string()).optional(),
@@ -6480,6 +6497,7 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   WorkspaceTitleSetResponseSchema,
   WorkspacePinSetResponseSchema,
   WorkspacePinGroupListResponseSchema,
+  WorkspacePinGroupSetMembershipResponseSchema,
   WorkspacePinGroupCreateResponseSchema,
   WorkspacePinGroupRenameResponseSchema,
   WorkspacePinGroupDeleteResponseSchema,
@@ -6684,6 +6702,9 @@ export type WorkspacePinSetResponse = z.infer<typeof WorkspacePinSetResponseSche
 export type WorkspacePinSetResponsePayload = z.infer<typeof WorkspacePinSetResponsePayloadSchema>;
 export type WorkspacePinGroup = z.infer<typeof WorkspacePinGroupSchema>;
 export type WorkspacePinGroupListResponse = z.infer<typeof WorkspacePinGroupListResponseSchema>;
+export type WorkspacePinGroupSetMembershipResponse = z.infer<
+  typeof WorkspacePinGroupSetMembershipResponseSchema
+>;
 export type WorkspacePinGroupCreateResponse = z.infer<typeof WorkspacePinGroupCreateResponseSchema>;
 export type WorkspacePinGroupRenameResponse = z.infer<typeof WorkspacePinGroupRenameResponseSchema>;
 export type WorkspacePinGroupDeleteResponse = z.infer<typeof WorkspacePinGroupDeleteResponseSchema>;
@@ -6834,6 +6855,9 @@ export type ProjectRemoveRequest = z.infer<typeof ProjectRemoveRequestSchema>;
 export type WorkspaceTitleSetRequest = z.infer<typeof WorkspaceTitleSetRequestSchema>;
 export type WorkspacePinSetRequest = z.infer<typeof WorkspacePinSetRequestSchema>;
 export type WorkspacePinGroupListRequest = z.infer<typeof WorkspacePinGroupListRequestSchema>;
+export type WorkspacePinGroupSetMembershipRequest = z.infer<
+  typeof WorkspacePinGroupSetMembershipRequestSchema
+>;
 export type WorkspacePinGroupCreateRequest = z.infer<typeof WorkspacePinGroupCreateRequestSchema>;
 export type WorkspacePinGroupRenameRequest = z.infer<typeof WorkspacePinGroupRenameRequestSchema>;
 export type WorkspacePinGroupDeleteRequest = z.infer<typeof WorkspacePinGroupDeleteRequestSchema>;

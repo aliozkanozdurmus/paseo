@@ -673,12 +673,12 @@ function StatusWorkspaceRowWithMenu({
 
   const handleOpenRename = useCallback(() => setIsRenameOpen(true), []);
   const handleCloseRename = useCallback(() => setIsRenameOpen(false), []);
-  const isPinned = isWorkspacePinnedInGroup({
-    pinnedAt: workspace.pinnedAt,
-    pinGroupId: workspace.pinGroupId,
-    activeGroupId: activePinGroupId,
-    supportsPinGroups,
-  });
+  const isPinned = supportsPinGroups
+    ? isWorkspacePinnedInGroup({
+        pinGroupId: workspace.pinGroupId,
+        activeGroupId: activePinGroupId,
+      })
+    : workspace.pinnedAt != null;
   const handleTogglePin = useCallback(() => {
     onToggleWorkspacePin(workspace);
   }, [onToggleWorkspacePin, workspace]);

@@ -2501,12 +2501,7 @@ export class Session {
       case "workspace.title.set.request":
         return this.handleWorkspaceTitleSetRequest(msg.workspaceId, msg.title, msg.requestId);
       case "workspace.pin.set.request":
-        return this.handleWorkspacePinSetRequest(
-          msg.workspaceId,
-          msg.pinned,
-          msg.groupId,
-          msg.requestId,
-        );
+        return this.handleWorkspacePinSetRequest(msg.workspaceId, msg.pinned, msg.requestId);
       default:
         return undefined;
     }
@@ -2516,6 +2511,12 @@ export class Session {
     switch (msg.type) {
       case "workspace.pin_group.list.request":
         return this.handleWorkspacePinGroupListRequest(msg.requestId);
+      case "workspace.pin_group.set_membership.request":
+        return this.handleWorkspacePinGroupSetMembershipRequest(
+          msg.workspaceId,
+          msg.groupId,
+          msg.requestId,
+        );
       case "workspace.pin_group.create.request":
         return this.handleWorkspacePinGroupCreateRequest(msg.name, msg.requestId);
       case "workspace.pin_group.rename.request":
@@ -3348,16 +3349,14 @@ export class Session {
   private async handleWorkspacePinSetRequest(
     workspaceId: string,
     pinned: boolean,
-    groupId: string | undefined,
     requestId: string,
   ): Promise<void> {
-    const resolvedGroupId = pinned ? (groupId ?? DEFAULT_WORKSPACE_PIN_GROUP_ID) : null;
-    const logContext = { workspaceId, pinned, groupId: resolvedGroupId, requestId };
+    const resolvedGroupId = pinned ? DEFAULT_WORKSPACE_PIN_GROUP_ID : null;
+    const logContext = { workspaceId, pinned, requestId };
     this.sessionLogger.info(logContext, "session: workspace.pin.set.request");
     const emitResponse = (input: {
       accepted: boolean;
       pinnedAt: string | null;
-      groupId: string | null;
       error: string | null;
     }) => {
       this.emit({
@@ -3377,7 +3376,6 @@ export class Session {
         emitResponse({
           accepted: false,
           pinnedAt: null,
-          groupId: null,
           error: "Workspace not found",
         });
         return;
@@ -3385,7 +3383,6 @@ export class Session {
       emitResponse({
         accepted: true,
         pinnedAt: updated.pinnedAt,
-        groupId: updated.pinGroupId,
         error: null,
       });
       await this.emitWorkspaceUpdatesForWorkspaceIds([workspaceId]);
@@ -3406,7 +3403,6 @@ export class Session {
       emitResponse({
         accepted: false,
         pinnedAt: null,
-        groupId: null,
         error: getErrorMessageOr(error, "Failed to pin workspace"),
       });
     }
@@ -3418,6 +3414,24 @@ export class Session {
       type: "workspace.pin_group.list.response",
       payload: { requestId, groups },
     });
+  }
+
+  private async handleWorkspacePinGroupSetMembershipRequest(
+    workspaceId: string,
+    groupId: string | null,
+    requestId: string,
+  ): Promise<void> {
+    const updated = await this.workspaceRegistry.setWorkspacePinGroup({
+      workspaceId,
+      groupId,
+      updatedAt: new Date().toISOString(),
+    });
+    if (!updated) throw new Error("Workspace not found");
+    this.emit({
+      type: "workspace.pin_group.set_membership.response",
+      payload: { requestId, workspaceId, groupId: updated.pinGroupId },
+    });
+    await this.emitWorkspaceUpdatesForWorkspaceIds([workspaceId]);
   }
 
   private async handleWorkspacePinGroupCreateRequest(

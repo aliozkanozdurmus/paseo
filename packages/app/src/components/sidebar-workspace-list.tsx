@@ -151,7 +151,11 @@ import type { HostBadgeModel } from "@/hosts/appearance";
 import { useHostBadges } from "@/hosts/use-host-badges";
 import { useSidebarRowItems } from "@/components/sidebar/display-preferences/model";
 import { PullRequestStateIcon } from "@/git/pull-request-state-icon";
-import { isWorkspacePinnedInGroup } from "@/workspace-pin-groups/menu-model";
+import {
+  canWorkspaceUseActivePinGroup,
+  isWorkspacePinnedInGroup,
+  resolveWorkspacePinGroupServerId,
+} from "@/workspace-pin-groups/menu-model";
 
 const workspaceKeyExtractor = (workspace: SidebarWorkspacePlacement) => workspace.workspaceKey;
 
@@ -1283,12 +1287,14 @@ function WorkspaceRowWithMenu({
     setIsRenameOpen(false);
   }, []);
 
-  const isPinned = isWorkspacePinnedInGroup({
-    pinnedAt: workspace.pinnedAt,
-    pinGroupId: workspace.pinGroupId,
-    activeGroupId: activePinGroupId,
-    supportsPinGroups,
-  });
+  const isPinned =
+    canPin &&
+    (supportsPinGroups
+      ? isWorkspacePinnedInGroup({
+          pinGroupId: workspace.pinGroupId,
+          activeGroupId: activePinGroupId,
+        })
+      : workspace.pinnedAt != null);
   const handleTogglePin = useCallback(() => {
     onToggleWorkspacePin(workspace);
   }, [onToggleWorkspacePin, workspace]);
@@ -1931,11 +1937,41 @@ export function SidebarWorkspaceList({
   const serverIds = useMemo(() => hosts.map((host) => host.serverId), [hosts]);
   const supportsMultiplicityByServerId = useHostFeatureMap(serverIds, "workspaceMultiplicity");
   const supportsPinGroupsByServerId = useHostFeatureMap(serverIds, "workspacePinGroups");
-  const supportsPinningByServerId = supportsPinGroupsByServerId;
+  const supportsLegacyPinningByServerId = useHostFeatureMap(serverIds, "workspacePinning");
   const activePinGroupId = useSidebarViewStore((state) => state.activePinGroupId);
-  const onlyServerId = serverIds.length === 1 ? (serverIds[0] ?? null) : null;
-  const pinGroupServerId =
-    onlyServerId && supportsPinGroupsByServerId.get(onlyServerId) === true ? onlyServerId : null;
+  const activePinGroupServerId = useSidebarViewStore((state) => state.activePinGroupServerId);
+  const supportsPinningByServerId = useMemo(
+    () =>
+      new Map(
+        serverIds.map((serverId) => [
+          serverId,
+          canWorkspaceUseActivePinGroup({
+            workspaceServerId: serverId,
+            supportsPinGroups: supportsPinGroupsByServerId.get(serverId) === true,
+            supportsLegacyPinning: supportsLegacyPinningByServerId.get(serverId) === true,
+            activeGroupId: activePinGroupId,
+            activeGroupServerId: activePinGroupServerId,
+          }),
+        ]),
+      ),
+    [
+      activePinGroupId,
+      activePinGroupServerId,
+      serverIds,
+      supportsLegacyPinningByServerId,
+      supportsPinGroupsByServerId,
+    ],
+  );
+  const hostFilters = useSidebarViewStore((state) => state.hostFilters);
+  const activeWorkspaceSelection = useActiveWorkspaceSelection();
+  const pinGroupServerId = resolveWorkspacePinGroupServerId({
+    connectedServerIds: serverIds,
+    supportsPinGroupsByServerId,
+    activeGroupId: activePinGroupId,
+    activeGroupServerId: activePinGroupServerId,
+    activeWorkspaceServerId: activeWorkspaceSelection?.serverId,
+    hostFilters,
+  });
   const onToggleWorkspacePin = useSidebarWorkspacePinController();
   const getPinnedWorkspaceOrder = useSidebarOrderStore((state) => state.getPinnedWorkspaceOrder);
   const setPinnedWorkspaceOrder = useSidebarOrderStore((state) => state.setPinnedWorkspaceOrder);

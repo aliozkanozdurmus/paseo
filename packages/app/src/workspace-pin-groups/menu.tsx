@@ -26,6 +26,7 @@ import { DEFAULT_WORKSPACE_PIN_GROUP_ID, useSidebarViewStore } from "@/stores/si
 import type { Theme } from "@/styles/theme";
 import { confirmDialog } from "@/utils/confirm-dialog";
 import { useFetchQuery } from "@/data/query";
+import { useToast } from "@/contexts/toast-context";
 import { buildWorkspacePinGroupMenuModel } from "./menu-model";
 
 const SWITCH_PAGE_ID = "workspacePinGroupsSwitch";
@@ -52,10 +53,9 @@ function pinGroupErrorMessage(cause: unknown, fallback: string): string {
 
 export function WorkspacePinGroupMenu({ serverId }: { serverId: string }): ReactElement {
   const { t } = useTranslation();
+  const toast = useToast();
   const activeGroupId = useSidebarViewStore((state) => state.activePinGroupId);
   const setActiveGroupId = useSidebarViewStore((state) => state.setActivePinGroupId);
-  const [deletePending, setDeletePending] = useState(false);
-  const [actionError, setActionError] = useState<string | null>(null);
   const groupsQuery = useFetchQuery<WorkspacePinGroup[]>({
     queryKey: pinGroupsQueryKey(serverId),
     queryFn: () => getPinGroupClient(serverId).listWorkspacePinGroups(),
@@ -71,14 +71,21 @@ export function WorkspacePinGroupMenu({ serverId }: { serverId: string }): React
 
   useEffect(() => {
     if (!groupsQuery.data || model.activeGroup) return;
-    setActiveGroupId(DEFAULT_WORKSPACE_PIN_GROUP_ID);
+    setActiveGroupId(DEFAULT_WORKSPACE_PIN_GROUP_ID, null);
   }, [groupsQuery.data, model.activeGroup, setActiveGroupId]);
+
+  const selectGroup = useCallback(
+    (groupId: string) => {
+      setActiveGroupId(groupId, groupId === DEFAULT_WORKSPACE_PIN_GROUP_ID ? null : serverId);
+    },
+    [serverId, setActiveGroupId],
+  );
 
   const createGroup = useCallback(
     async (name: string) => {
       const group = await getPinGroupClient(serverId).createWorkspacePinGroup(name);
       await refetchGroups();
-      setActiveGroupId(group.id);
+      setActiveGroupId(group.id, serverId);
     },
     [refetchGroups, serverId, setActiveGroupId],
   );
@@ -92,7 +99,7 @@ export function WorkspacePinGroupMenu({ serverId }: { serverId: string }): React
   );
   const deleteGroup = useCallback(async () => {
     const activeGroup = model.activeGroup;
-    if (!activeGroup || activeGroup.id === DEFAULT_WORKSPACE_PIN_GROUP_ID || deletePending) return;
+    if (!activeGroup || activeGroup.id === DEFAULT_WORKSPACE_PIN_GROUP_ID) return;
     const confirmed = await confirmDialog({
       title: t("sidebar.pinned.groups.deleteTitle", { name: activeGroup.name }),
       message: t("sidebar.pinned.groups.deleteDescription"),
@@ -101,18 +108,14 @@ export function WorkspacePinGroupMenu({ serverId }: { serverId: string }): React
       destructive: true,
     });
     if (!confirmed) return;
-    setDeletePending(true);
-    setActionError(null);
     try {
       await getPinGroupClient(serverId).deleteWorkspacePinGroup(activeGroup.id);
-      setActiveGroupId(DEFAULT_WORKSPACE_PIN_GROUP_ID);
+      setActiveGroupId(DEFAULT_WORKSPACE_PIN_GROUP_ID, null);
       await refetchGroups();
     } catch (cause) {
-      setActionError(pinGroupErrorMessage(cause, t("sidebar.pinned.groups.actionError")));
-    } finally {
-      setDeletePending(false);
+      toast.error(pinGroupErrorMessage(cause, t("sidebar.pinned.groups.actionError")));
     }
-  }, [deletePending, model.activeGroup, refetchGroups, serverId, setActiveGroupId, t]);
+  }, [model.activeGroup, refetchGroups, serverId, setActiveGroupId, t, toast]);
 
   const switchPage = useMemo(
     () => (
@@ -121,12 +124,12 @@ export function WorkspacePinGroupMenu({ serverId }: { serverId: string }): React
           <WorkspacePinGroupChoiceRow
             key={choice.group.id}
             choice={choice}
-            onSelect={setActiveGroupId}
+            onSelect={selectGroup}
           />
         ))}
       </>
     ),
-    [model.choices, setActiveGroupId],
+    [model.choices, selectGroup],
   );
   const pages = useMemo<readonly MenuPageDefinition[]>(
     () => [
@@ -229,9 +232,6 @@ export function WorkspacePinGroupMenu({ serverId }: { serverId: string }): React
             {model.actions.includes("delete") ? (
               <DropdownMenuItem
                 destructive
-                status={deletePending ? "pending" : "idle"}
-                pendingLabel={t("sidebar.pinned.groups.deleting")}
-                closeOnSelect={false}
                 onSelect={selectDelete}
                 testID="sidebar-pin-group-delete"
               >
@@ -239,11 +239,6 @@ export function WorkspacePinGroupMenu({ serverId }: { serverId: string }): React
               </DropdownMenuItem>
             ) : null}
           </>
-        ) : null}
-        {actionError ? (
-          <DropdownMenuHint testID="sidebar-pin-groups-action-error">
-            {actionError}
-          </DropdownMenuHint>
         ) : null}
       </DropdownMenuContent>
     </DropdownMenu>

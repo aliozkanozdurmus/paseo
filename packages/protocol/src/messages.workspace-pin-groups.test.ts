@@ -24,29 +24,25 @@ describe("workspace pin group wire schemas", () => {
     });
   });
 
-  test("round-trips group membership on pin requests and responses", () => {
+  test("round-trips group membership on its paired RPC", () => {
     expect(
       SessionInboundMessageSchema.parse({
-        type: "workspace.pin.set.request",
+        type: "workspace.pin_group.set_membership.request",
         workspaceId: "ws-1",
-        pinned: true,
         groupId: "pgrp_focus",
         requestId: "req-pin",
       }),
     ).toMatchObject({ groupId: "pgrp_focus" });
     expect(
       SessionOutboundMessageSchema.parse({
-        type: "workspace.pin.set.response",
+        type: "workspace.pin_group.set_membership.response",
         payload: {
           requestId: "req-pin",
           workspaceId: "ws-1",
-          accepted: true,
-          pinnedAt: null,
           groupId: "pgrp_focus",
-          error: null,
         },
       }),
-    ).toMatchObject({ payload: { groupId: "pgrp_focus", pinnedAt: null } });
+    ).toMatchObject({ payload: { groupId: "pgrp_focus" } });
   });
 
   test("parses the paired group CRUD RPCs", () => {
@@ -61,6 +57,22 @@ describe("workspace pin group wire schemas", () => {
         response: {
           type: "workspace.pin_group.list.response",
           payload: { requestId: "req-list", groups: [group] },
+        },
+      },
+      {
+        request: {
+          type: "workspace.pin_group.set_membership.request",
+          requestId: "req-membership",
+          workspaceId: "ws-1",
+          groupId: group.id,
+        },
+        response: {
+          type: "workspace.pin_group.set_membership.response",
+          payload: {
+            requestId: "req-membership",
+            workspaceId: "ws-1",
+            groupId: group.id,
+          },
         },
       },
       {

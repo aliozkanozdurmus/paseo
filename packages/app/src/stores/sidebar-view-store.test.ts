@@ -43,6 +43,7 @@ describe("sidebar view store", () => {
     useSidebarViewStore.setState({
       groupMode: "project",
       activePinGroupId: DEFAULT_WORKSPACE_PIN_GROUP_ID,
+      activePinGroupServerId: null,
       hostFilters: [],
       projectFilters: [],
       labelFilter: { labels: [] },
@@ -85,6 +86,23 @@ describe("sidebar view store", () => {
     expect(useSidebarViewStore.getState().hostFilters).toEqual(["host-a"]);
   });
 
+  it("resets a custom pin group only after its owning host is removed", () => {
+    const store = useSidebarViewStore.getState();
+    store.setActivePinGroupId("team", "host-a");
+
+    store.reconcileHostFilters(["host-a", "host-b"]);
+    expect(useSidebarViewStore.getState()).toMatchObject({
+      activePinGroupId: "team",
+      activePinGroupServerId: "host-a",
+    });
+
+    store.reconcileHostFilters(["host-b"]);
+    expect(useSidebarViewStore.getState()).toMatchObject({
+      activePinGroupId: DEFAULT_WORKSPACE_PIN_GROUP_ID,
+      activePinGroupServerId: null,
+    });
+  });
+
   it("migrates legacy per-host group modes to the new global mode", () => {
     expect(
       migrateSidebarViewState({
@@ -96,6 +114,7 @@ describe("sidebar view store", () => {
     ).toEqual({
       groupMode: "status",
       activePinGroupId: DEFAULT_WORKSPACE_PIN_GROUP_ID,
+      activePinGroupServerId: null,
       hostFilters: [],
       projectFilters: [],
       labelFilter: { labels: [] },
@@ -111,6 +130,7 @@ describe("sidebar view store", () => {
     ).toEqual({
       groupMode: "status",
       activePinGroupId: DEFAULT_WORKSPACE_PIN_GROUP_ID,
+      activePinGroupServerId: null,
       hostFilters: ["host-a"],
       projectFilters: [],
       labelFilter: { labels: [] },
@@ -126,6 +146,7 @@ describe("sidebar view store", () => {
     ).toEqual({
       groupMode: "status",
       activePinGroupId: DEFAULT_WORKSPACE_PIN_GROUP_ID,
+      activePinGroupServerId: null,
       hostFilters: ["host-a", "host-b"],
       projectFilters: [],
       labelFilter: { labels: [] },
@@ -237,6 +258,7 @@ describe("sidebar view store", () => {
     ).toEqual({
       groupMode: "project",
       activePinGroupId: DEFAULT_WORKSPACE_PIN_GROUP_ID,
+      activePinGroupServerId: null,
       hostFilters: ["host-a"],
       projectFilters: ["project-a", "project-b"],
       labelFilter: { labels: [] },
@@ -247,6 +269,7 @@ describe("sidebar view store", () => {
     expect(migrateSidebarViewState({ projectFilters: "project-a" })).toEqual({
       groupMode: "project",
       activePinGroupId: DEFAULT_WORKSPACE_PIN_GROUP_ID,
+      activePinGroupServerId: null,
       hostFilters: [],
       projectFilters: [],
       labelFilter: { labels: [] },
@@ -304,24 +327,44 @@ describe("sidebar view store", () => {
 
   it("persists and normalizes the active pin group", () => {
     expect(
-      migrateSidebarViewState({ groupMode: "project", activePinGroupId: " team " })
-        .activePinGroupId,
-    ).toBe("team");
+      migrateSidebarViewState({
+        groupMode: "project",
+        activePinGroupId: " team ",
+        activePinGroupServerId: " host-a ",
+      }),
+    ).toMatchObject({
+      activePinGroupId: "team",
+      activePinGroupServerId: "host-a",
+    });
 
-    useSidebarViewStore.getState().setActivePinGroupId(" review ");
-    expect(useSidebarViewStore.getState().activePinGroupId).toBe("review");
+    expect(
+      migrateSidebarViewState({ groupMode: "project", activePinGroupId: "team" }),
+    ).toMatchObject({
+      activePinGroupId: DEFAULT_WORKSPACE_PIN_GROUP_ID,
+      activePinGroupServerId: null,
+    });
 
-    useSidebarViewStore.getState().setActivePinGroupId(" ");
-    expect(useSidebarViewStore.getState().activePinGroupId).toBe(DEFAULT_WORKSPACE_PIN_GROUP_ID);
+    useSidebarViewStore.getState().setActivePinGroupId(" review ", " host-a ");
+    expect(useSidebarViewStore.getState()).toMatchObject({
+      activePinGroupId: "review",
+      activePinGroupServerId: "host-a",
+    });
+
+    useSidebarViewStore.getState().setActivePinGroupId(" ", "host-a");
+    expect(useSidebarViewStore.getState()).toMatchObject({
+      activePinGroupId: DEFAULT_WORKSPACE_PIN_GROUP_ID,
+      activePinGroupServerId: null,
+    });
   });
 
-  it("includes the active pin group in persisted device state", () => {
-    useSidebarViewStore.getState().setActivePinGroupId("team");
+  it("includes the active pin group scope in persisted device state", () => {
+    useSidebarViewStore.getState().setActivePinGroupId("team", "host-a");
 
     const partialize = useSidebarViewStore.persist.getOptions().partialize;
 
     expect(partialize?.(useSidebarViewStore.getState())).toMatchObject({
       activePinGroupId: "team",
+      activePinGroupServerId: "host-a",
     });
   });
 });

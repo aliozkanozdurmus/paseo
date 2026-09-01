@@ -14,6 +14,52 @@ export interface WorkspacePinGroupMenuModel {
   actions: WorkspacePinGroupMenuActionId[];
 }
 
+export function resolveWorkspacePinGroupServerId(input: {
+  connectedServerIds: readonly string[];
+  supportsPinGroupsByServerId: ReadonlyMap<string, boolean>;
+  activeGroupId: string;
+  activeGroupServerId: string | null | undefined;
+  activeWorkspaceServerId: string | null | undefined;
+  hostFilters: readonly string[];
+}): string | null {
+  const capableServerIds = input.connectedServerIds.filter(
+    (serverId) => input.supportsPinGroupsByServerId.get(serverId) === true,
+  );
+  if (input.activeGroupId !== DEFAULT_WORKSPACE_PIN_GROUP_ID) {
+    return input.activeGroupServerId && capableServerIds.includes(input.activeGroupServerId)
+      ? input.activeGroupServerId
+      : null;
+  }
+  if (input.activeWorkspaceServerId && capableServerIds.includes(input.activeWorkspaceServerId)) {
+    return input.activeWorkspaceServerId;
+  }
+  const filteredServerId = input.hostFilters.length === 1 ? input.hostFilters[0] : null;
+  if (filteredServerId && capableServerIds.includes(filteredServerId)) {
+    return filteredServerId;
+  }
+  if (capableServerIds.length === 1) {
+    return capableServerIds[0] ?? null;
+  }
+  return [...capableServerIds].sort().at(0) ?? null;
+}
+
+export function canWorkspaceUseActivePinGroup(input: {
+  workspaceServerId: string | null | undefined;
+  supportsPinGroups: boolean;
+  supportsLegacyPinning: boolean;
+  activeGroupId: string;
+  activeGroupServerId: string | null | undefined;
+}): boolean {
+  if (input.activeGroupId === DEFAULT_WORKSPACE_PIN_GROUP_ID) {
+    return input.supportsPinGroups || input.supportsLegacyPinning;
+  }
+  return (
+    input.supportsPinGroups &&
+    input.workspaceServerId != null &&
+    input.workspaceServerId === input.activeGroupServerId
+  );
+}
+
 export function buildWorkspacePinGroupMenuModel(input: {
   groups: readonly WorkspacePinGroup[];
   activeGroupId: string;
@@ -34,31 +80,21 @@ export function buildWorkspacePinGroupMenuModel(input: {
 }
 
 export function isWorkspacePinnedInGroup(input: {
-  pinnedAt: string | null | undefined;
   pinGroupId: string | null | undefined;
   activeGroupId: string;
-  supportsPinGroups: boolean;
 }): boolean {
-  if (!input.supportsPinGroups) {
-    return input.pinnedAt != null;
-  }
   return input.pinGroupId === input.activeGroupId;
 }
 
-export type WorkspacePinMutationPlan =
-  | { kind: "unsupported" }
-  | { kind: "set"; pinned: boolean; groupId: string };
+export interface WorkspacePinMutationPlan {
+  groupId: string | null;
+}
 
 export function planWorkspacePinMutation(input: {
-  pinnedAt: string | null | undefined;
   pinGroupId: string | null | undefined;
   activeGroupId: string;
-  supportsPinGroups: boolean;
 }): WorkspacePinMutationPlan {
-  if (!input.supportsPinGroups) return { kind: "unsupported" };
   return {
-    kind: "set",
-    pinned: !isWorkspacePinnedInGroup(input),
-    groupId: input.activeGroupId,
+    groupId: isWorkspacePinnedInGroup(input) ? null : input.activeGroupId,
   };
 }

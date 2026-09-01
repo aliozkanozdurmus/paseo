@@ -13,6 +13,7 @@ export interface SeedWorkspaceDescriptor {
   projectRootPath: string;
   workspaceDirectory: string;
   diffStat: { additions: number; deletions: number } | null;
+  pinGroupId?: string | null;
   labels?: string[];
 }
 

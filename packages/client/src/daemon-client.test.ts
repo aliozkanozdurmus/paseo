@@ -3172,7 +3172,7 @@ test("sends workspace pin group CRUD requests and returns their groups", async (
   await expect(deletePromise).resolves.toBeUndefined();
 });
 
-test("sends workspace group membership and returns both compatibility fields", async () => {
+test("keeps the legacy workspace pin request unchanged", async () => {
   const mock = createMockTransport();
   const client = new DaemonClient({
     url: "ws://test",
@@ -3185,28 +3185,59 @@ test("sends workspace group membership and returns both compatibility fields", a
   mock.triggerOpen();
   await connectPromise;
 
-  const pinPromise = client.setWorkspacePinned("ws-1", true, "pgrp-focus", "req-pin-membership");
+  const pinPromise = client.setWorkspacePinned("ws-1", true, "req-pin-default");
   expect(parseSentFrame(mock.sent[0])).toEqual({
     type: "workspace.pin.set.request",
-    requestId: "req-pin-membership",
+    requestId: "req-pin-default",
     workspaceId: "ws-1",
     pinned: true,
-    groupId: "pgrp-focus",
   });
   mock.triggerMessage(
     wrapSessionMessage({
       type: "workspace.pin.set.response",
       payload: {
-        requestId: "req-pin-membership",
+        requestId: "req-pin-default",
         workspaceId: "ws-1",
         accepted: true,
-        pinnedAt: null,
-        groupId: "pgrp-focus",
+        pinnedAt: "2026-08-31T12:00:00.000Z",
         error: null,
       },
     }),
   );
-  await expect(pinPromise).resolves.toEqual({ pinnedAt: null, groupId: "pgrp-focus" });
+  await expect(pinPromise).resolves.toEqual({ pinnedAt: "2026-08-31T12:00:00.000Z" });
+});
+
+test("sends workspace group membership through its dotted RPC", async () => {
+  const mock = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "pin-membership-unit-test",
+    reconnect: { enabled: false },
+    transportFactory: () => mock.transport,
+  });
+  clients.push(client);
+  const connectPromise = client.connect();
+  mock.triggerOpen();
+  await connectPromise;
+
+  const pinPromise = client.setWorkspacePinGroup("ws-1", "pgrp-focus", "req-pin-membership");
+  expect(parseSentFrame(mock.sent[0])).toEqual({
+    type: "workspace.pin_group.set_membership.request",
+    requestId: "req-pin-membership",
+    workspaceId: "ws-1",
+    groupId: "pgrp-focus",
+  });
+  mock.triggerMessage(
+    wrapSessionMessage({
+      type: "workspace.pin_group.set_membership.response",
+      payload: {
+        requestId: "req-pin-membership",
+        workspaceId: "ws-1",
+        groupId: "pgrp-focus",
+      },
+    }),
+  );
+  await expect(pinPromise).resolves.toEqual({ groupId: "pgrp-focus" });
 });
 
 test("sends worktree base-ref fields in create_paseo_worktree_request", async () => {

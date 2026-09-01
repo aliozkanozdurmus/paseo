@@ -8,7 +8,7 @@ import type {
 import { applyStoredOrdering } from "@/hooks/sidebar-workspaces-view-model";
 import { useHostFeatureMap } from "@/runtime/host-features";
 import { useSessionStore } from "@/stores/session-store";
-import { useSidebarViewStore } from "@/stores/sidebar-view-store";
+import { DEFAULT_WORKSPACE_PIN_GROUP_ID, useSidebarViewStore } from "@/stores/sidebar-view-store";
 
 export interface PinnedSidebarKeys {
   pinnedWorkspaceKeys: string[];
@@ -46,6 +46,7 @@ export function buildPinnedSidebarKeys(input: {
   workspaceMaps: ReadonlyMap<string, ReadonlyMap<string, WorkspacePinFields>>;
   supportsPinGroupsByServerId: ReadonlyMap<string, boolean>;
   activePinGroupId: string;
+  activePinGroupServerId: string | null;
 }): PinnedSidebarKeys {
   const pinnedWorkspaceKeys: string[] = [];
   const pinnedAtByKey: Record<string, string> = {};
@@ -54,9 +55,11 @@ export function buildPinnedSidebarKeys(input: {
     for (const placement of project.workspaces) {
       const workspace = input.workspaceMaps.get(placement.serverId)?.get(placement.workspaceId);
       const supportsPinGroups = input.supportsPinGroupsByServerId.get(placement.serverId) === true;
+      const isDefaultGroup = input.activePinGroupId === DEFAULT_WORKSPACE_PIN_GROUP_ID;
       const isPinned = supportsPinGroups
-        ? workspace?.pinGroupId === input.activePinGroupId
-        : workspace?.pinnedAt != null;
+        ? (isDefaultGroup || placement.serverId === input.activePinGroupServerId) &&
+          workspace?.pinGroupId === input.activePinGroupId
+        : isDefaultGroup && workspace?.pinnedAt != null;
       if (isPinned) {
         pinnedWorkspaceKeys.push(placement.workspaceKey);
         if (workspace?.pinnedAt) {
@@ -100,6 +103,7 @@ export function usePinnedSidebarKeys(projects: SidebarProjectEntry[]): PinnedSid
   );
   const supportsPinGroupsByServerId = useHostFeatureMap(serverIds, "workspacePinGroups");
   const activePinGroupId = useSidebarViewStore((state) => state.activePinGroupId);
+  const activePinGroupServerId = useSidebarViewStore((state) => state.activePinGroupServerId);
   const workspaceMaps = useStoreWithEqualityFn(
     useSessionStore,
     (state) => serverIds.map((serverId) => state.sessions[serverId]?.workspaces ?? null),
@@ -119,13 +123,21 @@ export function usePinnedSidebarKeys(projects: SidebarProjectEntry[]): PinnedSid
       workspaceMaps: workspaceMapByServerId,
       supportsPinGroupsByServerId,
       activePinGroupId,
+      activePinGroupServerId,
     });
     if (arePinnedSidebarKeysEqual(previousKeysRef.current, nextKeys)) {
       return previousKeysRef.current;
     }
     previousKeysRef.current = nextKeys;
     return nextKeys;
-  }, [activePinGroupId, projects, serverIds, supportsPinGroupsByServerId, workspaceMaps]);
+  }, [
+    activePinGroupId,
+    activePinGroupServerId,
+    projects,
+    serverIds,
+    supportsPinGroupsByServerId,
+    workspaceMaps,
+  ]);
 }
 
 // Splits the sidebar into a dedicated Pinned section (chats) and the regular list below.

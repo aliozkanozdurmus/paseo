@@ -2700,23 +2700,21 @@ export class DaemonClient {
   async setWorkspacePinned(
     workspaceId: string,
     pinned: boolean,
-    groupId?: string,
     requestId?: string,
-  ): Promise<{ pinnedAt: string | null; groupId: string | null }> {
+  ): Promise<{ pinnedAt: string | null }> {
     const payload = await this.sendCorrelatedSessionRequest({
       requestId,
       message: {
         type: "workspace.pin.set.request",
         workspaceId,
         pinned,
-        ...(groupId === undefined ? {} : { groupId }),
       },
       responseType: "workspace.pin.set.response",
     });
     if (!payload.accepted) {
       throw new Error(payload.error ?? "setWorkspacePinned rejected");
     }
-    return { pinnedAt: payload.pinnedAt, groupId: payload.groupId ?? null };
+    return { pinnedAt: payload.pinnedAt };
   }
 
   async listWorkspacePinGroups(requestId?: string): Promise<WorkspacePinGroup[]> {
@@ -2726,6 +2724,25 @@ export class DaemonClient {
         message: { type: "workspace.pin_group.list.request" },
       });
     return payload.groups;
+  }
+
+  async setWorkspacePinGroup(
+    workspaceId: string,
+    groupId: string | null,
+    requestId?: string,
+  ): Promise<{ groupId: string | null }> {
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"workspace.pin_group.set_membership.response">(
+        {
+          requestId,
+          message: {
+            type: "workspace.pin_group.set_membership.request",
+            workspaceId,
+            groupId,
+          },
+        },
+      );
+    return { groupId: payload.groupId };
   }
 
   async createWorkspacePinGroup(name: string, requestId?: string): Promise<WorkspacePinGroup> {

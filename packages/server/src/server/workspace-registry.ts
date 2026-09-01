@@ -136,6 +136,7 @@ function normalizePinGroupName(name: string): string {
   return normalized;
 }
 
+// COMPAT(workspacePinGroups): added in v0.7.0, remove pinnedAt migration/projection after 2027-03-01.
 function normalizeWorkspacePinMembership(
   workspace: PersistedWorkspaceRecord,
   pinGroups: ReadonlyMap<string, WorkspacePinGroup>,
@@ -777,7 +778,7 @@ export class FileBackedWorkspaceRegistry
       }
       const existing = workspaces.get(input.workspaceId);
       if (!existing) return null;
-      // COMPAT(pinGroups): added in v0.7.x, remove after 2027-03-01
+      // COMPAT(workspacePinGroups): added in v0.7.0, remove pinnedAt projection after 2027-03-01.
       const pinnedAt = input.groupId === DEFAULT_WORKSPACE_PIN_GROUP_ID ? input.updatedAt : null;
       const updated = PersistedWorkspaceRecordSchema.parse({
         ...existing,
@@ -1001,6 +1002,7 @@ export function createPersistedWorkspaceRecord(input: {
   pinGroupId?: string | null;
   labels?: string[];
 }): PersistedWorkspaceRecord {
+  // COMPAT(workspacePinGroups): added in v0.7.0, remove pinnedAt migration/projection after 2027-03-01.
   const pinGroupId = input.pinGroupId ?? (input.pinnedAt ? DEFAULT_WORKSPACE_PIN_GROUP_ID : null);
   const pinnedAt = pinGroupId === DEFAULT_WORKSPACE_PIN_GROUP_ID ? (input.pinnedAt ?? null) : null;
   return PersistedWorkspaceRecordSchema.parse({

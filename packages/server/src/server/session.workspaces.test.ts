@@ -8235,7 +8235,6 @@ test("workspace.pin.set.request stores the pin timestamp and emits an updated de
     requestId: "req-pin-1",
     workspaceId: "ws-1",
     accepted: true,
-    groupId: DEFAULT_WORKSPACE_PIN_GROUP_ID,
     error: null,
   });
   expect(response?.payload.pinnedAt).toEqual(expect.any(String));
@@ -8250,7 +8249,7 @@ test("workspace.pin.set.request stores the pin timestamp and emits an updated de
   });
 });
 
-test("workspace pin group RPCs list, create, rename, and delete daemon-shared groups", async () => {
+test("workspace pin group RPCs manage the daemon-shared catalog and membership", async () => {
   const emitted: SessionOutboundMessage[] = [];
   const session = asTestSession(
     createSessionForWorkspaceTests({ onMessage: (message) => emitted.push(message) }),
@@ -8269,11 +8268,28 @@ test("workspace pin group RPCs list, create, rename, and delete daemon-shared gr
   session.workspaceRegistry.createPinGroup = async () => focusGroup;
   session.workspaceRegistry.renamePinGroup = async () => ({ ...focusGroup, name: "This week" });
   session.workspaceRegistry.deletePinGroup = async () => ["ws-1"];
+  session.workspaceRegistry.setWorkspacePinGroup = async (input) =>
+    createPersistedWorkspaceRecord({
+      workspaceId: input.workspaceId,
+      projectId: "proj-1",
+      cwd: REPO_CWD,
+      kind: "local_checkout",
+      displayName: "main",
+      createdAt: "2026-08-31T12:00:00.000Z",
+      updatedAt: input.updatedAt,
+      pinGroupId: input.groupId,
+    });
   session.emitWorkspaceUpdatesForWorkspaceIds = vi.fn(async () => {});
 
   await session.handleMessage({
     type: "workspace.pin_group.list.request",
     requestId: "req-list",
+  });
+  await session.handleMessage({
+    type: "workspace.pin_group.set_membership.request",
+    workspaceId: "ws-1",
+    groupId: focusGroup.id,
+    requestId: "req-membership",
   });
   await session.handleMessage({
     type: "workspace.pin_group.create.request",
@@ -8295,6 +8311,11 @@ test("workspace pin group RPCs list, create, rename, and delete daemon-shared gr
   expect(findByType(emitted, "workspace.pin_group.list.response")?.payload).toEqual({
     requestId: "req-list",
     groups: [defaultGroup],
+  });
+  expect(findByType(emitted, "workspace.pin_group.set_membership.response")?.payload).toEqual({
+    requestId: "req-membership",
+    workspaceId: "ws-1",
+    groupId: focusGroup.id,
   });
   expect(findByType(emitted, "workspace.pin_group.create.response")?.payload).toEqual({
     requestId: "req-create",

@@ -5,10 +5,10 @@ import type {
 } from "@/hooks/sidebar-workspaces-view-model";
 import { buildPinnedSidebarKeys, splitPinnedSidebarGroups } from "@/hooks/use-sidebar-pins";
 
-function placement(workspaceKey: string): SidebarWorkspacePlacement {
+function placement(workspaceKey: string, serverId = "s1"): SidebarWorkspacePlacement {
   return {
     workspaceKey,
-    serverId: "s1",
+    serverId,
     workspaceId: workspaceKey,
     projectViewKey: "p1",
     projectName: "Project 1",
@@ -132,6 +132,7 @@ describe("buildPinnedSidebarKeys", () => {
         workspaceMaps,
         supportsPinGroupsByServerId: new Map([["s1", true]]),
         activePinGroupId: "team",
+        activePinGroupServerId: "s1",
       }),
     ).toEqual({
       pinnedWorkspaceKeys: ["active"],
@@ -139,7 +140,7 @@ describe("buildPinnedSidebarKeys", () => {
     });
   });
 
-  it("keeps legacy pinned workspaces on hosts without pin groups", () => {
+  it("keeps legacy pinned workspaces in the default group", () => {
     const projects = [project("p1", [placement("legacy")])];
 
     expect(
@@ -149,11 +150,37 @@ describe("buildPinnedSidebarKeys", () => {
           ["s1", new Map([["legacy", { pinnedAt: "2026-01-01T00:00:00Z" }]])],
         ]),
         supportsPinGroupsByServerId: new Map([["s1", false]]),
-        activePinGroupId: "team",
+        activePinGroupId: "default",
+        activePinGroupServerId: null,
       }),
     ).toEqual({
       pinnedWorkspaceKeys: ["legacy"],
       pinnedAtByKey: { legacy: "2026-01-01T00:00:00Z" },
+    });
+  });
+
+  it("renders a custom group only from its owning capable host", () => {
+    const projects = [
+      project("p1", [placement("host-a-team", "host-a"), placement("host-b-team", "host-b")]),
+    ];
+
+    expect(
+      buildPinnedSidebarKeys({
+        projects,
+        workspaceMaps: new Map([
+          ["host-a", new Map([["host-a-team", { pinGroupId: "team" }]])],
+          ["host-b", new Map([["host-b-team", { pinGroupId: "team" }]])],
+        ]),
+        supportsPinGroupsByServerId: new Map([
+          ["host-a", true],
+          ["host-b", true],
+        ]),
+        activePinGroupId: "team",
+        activePinGroupServerId: "host-a",
+      }),
+    ).toEqual({
+      pinnedWorkspaceKeys: ["host-a-team"],
+      pinnedAtByKey: {},
     });
   });
 });

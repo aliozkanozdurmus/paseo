@@ -141,7 +141,9 @@ traffic. Workspace assignments stay on the workspace directory sequence.
 
 Workspace pin groups are daemon-shared catalog data fetched and changed through
 `workspace.pin_group.*` RPCs. Membership remains part of each workspace descriptor, so membership
-changes and group deletion use the workspace directory sequence.
+changes and group deletion use the workspace directory sequence. Custom group IDs are scoped to
+their daemon; the app stores the owning host with the active custom group and only offers that group
+for workspaces on that host. The `default` group spans capable hosts by its reserved ID.
 
 ### `packages/cli` — Command-line client
 
