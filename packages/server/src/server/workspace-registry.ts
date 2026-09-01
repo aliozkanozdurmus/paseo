@@ -257,7 +257,7 @@ const RETRYABLE_PIN_GROUP_TRANSACTION_READ_ERRORS = new Set([
 
 class UnsupportedWorkspacePinGroupFormatVersionError extends Error {
   constructor(
-    public readonly component: "sidecar" | "transaction",
+    public readonly component: "sidecar" | "marker" | "transaction",
     public readonly formatVersion: number,
   ) {
     super(
@@ -279,7 +279,10 @@ function missingFileHash(): string {
   return contentHash("workspace-pin-groups:file-missing");
 }
 
-function assertSupportedFormatVersion(value: unknown, component: "sidecar" | "transaction"): void {
+function assertSupportedFormatVersion(
+  value: unknown,
+  component: "sidecar" | "marker" | "transaction",
+): void {
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
   const formatVersion = Reflect.get(value, "formatVersion");
   if (typeof formatVersion === "number" && formatVersion > WORKSPACE_PIN_GROUPS_FORMAT_VERSION) {
@@ -1268,9 +1271,17 @@ export class FileBackedWorkspaceRegistry
   private parsePinGroupsFile(
     raw: string,
     primaryContentHash: string,
+    filePath: string,
   ): { file: PersistedWorkspacePinGroupsFile; legacy: boolean } {
     const value: unknown = JSON.parse(raw);
-    assertSupportedFormatVersion(value, "sidecar");
+    try {
+      assertSupportedFormatVersion(value, "sidecar");
+    } catch (error) {
+      if (error instanceof UnsupportedWorkspacePinGroupFormatVersionError) {
+        throw this.pinGroupsStorageFutureVersionError(error, filePath);
+      }
+      throw error;
+    }
     if (
       value &&
       typeof value === "object" &&
@@ -1290,6 +1301,30 @@ export class FileBackedWorkspaceRegistry
     return { file: WorkspacePinGroupsFileSchema.parse(value), legacy: false };
   }
 
+  private assertPinGroupsMarker(raw: string | null): void {
+    if (raw === null || raw === WORKSPACE_PIN_GROUPS_MARKER_CONTENTS) return;
+    try {
+      const value: unknown = JSON.parse(raw);
+      assertSupportedFormatVersion(value, "marker");
+    } catch (error) {
+      if (error instanceof UnsupportedWorkspacePinGroupFormatVersionError) {
+        throw this.pinGroupsStorageFutureVersionError(error, this.pinGroupsMarkerFilePath);
+      }
+    }
+    throw new Error(
+      `Invalid workspace pin-group storage marker at ${this.pinGroupsMarkerFilePath}`,
+    );
+  }
+
+  private pinGroupsStorageFutureVersionError(
+    error: UnsupportedWorkspacePinGroupFormatVersionError,
+    filePath: string,
+  ): WorkspaceRegistryIntegrityError {
+    return new WorkspaceRegistryIntegrityError(
+      `Workspace pin-group storage file at ${filePath} uses formatVersion ${error.formatVersion}, which may contain valid state written by a newer daemon. Keep every file unchanged: ${this.registryFilePath}, ${this.pinGroupsFilePath}, ${this.pinGroupsBackupFilePath}, ${this.pinGroupsMarkerFilePath}, and ${this.pinGroupsTransactionFilePath}. Run a newer daemon version that understands this storage format, then restart recovery. Cause: ${error.message}`,
+    );
+  }
+
   private async readOptionalRawFile(filePath: string): Promise<string | null> {
     try {
       return await fs.readFile(filePath, "utf8");
@@ -1303,11 +1338,7 @@ export class FileBackedWorkspaceRegistry
     const sidecarRaw = await this.readOptionalRawFile(this.pinGroupsFilePath);
     const backupRaw = await this.readOptionalRawFile(this.pinGroupsBackupFilePath);
     const markerRaw = await this.readOptionalRawFile(this.pinGroupsMarkerFilePath);
-    if (markerRaw !== null && markerRaw !== WORKSPACE_PIN_GROUPS_MARKER_CONTENTS) {
-      throw new Error(
-        `Invalid workspace pin-group storage marker at ${this.pinGroupsMarkerFilePath}`,
-      );
-    }
+    this.assertPinGroupsMarker(markerRaw);
     if (!sidecarRaw && !backupRaw) {
       if (markerRaw !== null) {
         throw new Error(
@@ -1319,7 +1350,11 @@ export class FileBackedWorkspaceRegistry
 
     try {
       if (!sidecarRaw && backupRaw) {
-        const backup = this.parsePinGroupsFile(backupRaw, primaryContentHash);
+        const backup = this.parsePinGroupsFile(
+          backupRaw,
+          primaryContentHash,
+          this.pinGroupsBackupFilePath,
+        );
         await this.writeRawFile(this.pinGroupsFilePath, backupRaw);
         return {
           file: backup.file,
@@ -1329,7 +1364,11 @@ export class FileBackedWorkspaceRegistry
         };
       }
 
-      const sidecar = this.parsePinGroupsFile(sidecarRaw!, primaryContentHash);
+      const sidecar = this.parsePinGroupsFile(
+        sidecarRaw!,
+        primaryContentHash,
+        this.pinGroupsFilePath,
+      );
       if (!backupRaw) {
         return {
           file: sidecar.file,
@@ -1338,7 +1377,11 @@ export class FileBackedWorkspaceRegistry
             !sidecar.legacy && sidecar.file.primaryContentHash === primaryContentHash,
         };
       }
-      const backup = this.parsePinGroupsFile(backupRaw, primaryContentHash);
+      const backup = this.parsePinGroupsFile(
+        backupRaw,
+        primaryContentHash,
+        this.pinGroupsBackupFilePath,
+      );
       if (
         !sidecar.legacy &&
         !backup.legacy &&

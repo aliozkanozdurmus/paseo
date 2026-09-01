@@ -460,13 +460,13 @@ missing primary with any established sidecar, backup, or marker blocks startup u
 the primary or explicitly reset the pin-group artifacts. Unknown newer sidecar and journal format
 versions, malformed or integrity-invalid journals, and persistent journal read failures block
 startup as integrity failures without rewriting their bytes. A future-version journal must be
-opened by a newer daemon. Permission failures require repairing access to the journal. Other
-persistent filesystem failures require repairing the journal path before recovery. Only `EAGAIN`,
-`EBUSY`, `EMFILE`, and `ENFILE` stay on the ordinary retry path. These atomic rename and journal
-guarantees cover process crashes. They do not promise recovery from power loss because the atomic
-writer does not fsync file and directory entries. A malformed primary file or sidecar blocks
-initialization and remains byte-for-byte untouched. A workspace is a specific working directory
-within a project.
+opened by a newer daemon, as must a future-version sidecar, backup, or expected marker. Permission
+failures require repairing access to the journal. Other persistent filesystem failures require
+repairing the journal path before recovery. Only `EAGAIN`, `EBUSY`, `EMFILE`, and `ENFILE` stay on
+the ordinary retry path. These atomic rename and journal guarantees cover process crashes. They do
+not promise recovery from power loss because the atomic writer does not fsync file and directory
+entries. A malformed primary file or sidecar blocks initialization and remains byte-for-byte
+untouched. A workspace is a specific working directory within a project.
 
 | Field                          | Type                                            | Description                                                                                                                                                                                   |
 | ------------------------------ | ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

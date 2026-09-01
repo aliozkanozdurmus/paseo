@@ -993,24 +993,98 @@ describe("workspace registries", () => {
     expect(existsSync(backupPath)).toBe(false);
   });
 
-  test("rejects a newer sidecar format without stripping or rewriting it", async () => {
-    const filePath = path.join(tmpDir, "projects", "future-sidecar-workspaces.json");
-    const sidecarPath = path.join(tmpDir, "projects", "future-sidecar-workspaces.pin-groups.json");
-    const registry = new FileBackedWorkspaceRegistry(filePath, logger);
+  test.each(["sidecar", "backup", "marker"] as const)(
+    "rejects a newer %s format without touching storage bytes",
+    async (futureArtifact) => {
+      const projectsPath = path.join(tmpDir, "projects");
+      const filePath = path.join(projectsPath, "future-storage-workspaces.json");
+      const sidecarPath = path.join(projectsPath, "future-storage-workspaces.pin-groups.json");
+      const backupPath = path.join(
+        projectsPath,
+        "future-storage-workspaces.pin-groups.backup.json",
+      );
+      const markerPath = path.join(
+        projectsPath,
+        "future-storage-workspaces.pin-groups.expected.json",
+      );
+      const transactionPath = path.join(
+        projectsPath,
+        "future-storage-workspaces.pin-groups.transaction.json",
+      );
+      const registry = new FileBackedWorkspaceRegistry(filePath, logger);
+      await registry.initialize();
+      const futurePath = {
+        sidecar: sidecarPath,
+        backup: backupPath,
+        marker: markerPath,
+      }[futureArtifact];
+      const futureValue =
+        futureArtifact === "marker"
+          ? { formatVersion: 2, futureMarker: { retained: true } }
+          : {
+              ...JSON.parse(readFileSync(futurePath, "utf8")),
+              formatVersion: 2,
+              futureCatalog: { retained: true },
+            };
+      writeFileSync(futurePath, JSON.stringify(futureValue));
+      const artifactPaths = [filePath, sidecarPath, backupPath, markerPath];
+      const untouched = snapshotFileBytes(artifactPaths);
+
+      const reloaded = new FileBackedWorkspaceRegistry(filePath, logger);
+      const failure = await reloaded.initialize().catch((cause: unknown) => cause);
+
+      expect(failure).toBeInstanceOf(WorkspaceRegistryIntegrityError);
+      expect(failure).toBeInstanceOf(Error);
+      const message = (failure as Error).message;
+      expect(message).toContain(futurePath);
+      expect(message).toContain("uses formatVersion 2");
+      expect(message).toContain("valid state written by a newer daemon");
+      expect(message).toContain("Keep every file unchanged");
+      expect(message).toContain("Run a newer daemon version that understands this storage format");
+      expect(message).not.toContain("restore");
+      expect(message).not.toContain("delete");
+      for (const artifactPath of [...artifactPaths, transactionPath]) {
+        expect(message).toContain(artifactPath);
+      }
+      expectFileBytesUnchanged(untouched);
+      expect(existsSync(transactionPath)).toBe(false);
+    },
+  );
+
+  test("loads a current-version sidecar and backup normally", async () => {
+    const filePath = path.join(tmpDir, "projects", "current-sidecar-workspaces.json");
+    const registry = new FileBackedWorkspaceRegistry(filePath, logger, {
+      pinGroupIdFactory: () => "pgrp_current",
+    });
     await registry.initialize();
-    const futureSidecar = {
-      ...JSON.parse(readFileSync(sidecarPath, "utf8")),
-      formatVersion: 2,
-      futureCatalog: { retained: true },
-    };
-    const futureBytes = JSON.stringify(futureSidecar);
-    writeFileSync(sidecarPath, futureBytes);
+    await registry.createPinGroup("Current");
 
     const reloaded = new FileBackedWorkspaceRegistry(filePath, logger);
-    await expect(reloaded.initialize()).rejects.toThrow(
-      "Unsupported workspace pin-group sidecar formatVersion 2",
-    );
-    expect(readFileSync(sidecarPath, "utf8")).toBe(futureBytes);
+    expect((await reloaded.listPinGroups()).map((group) => group.id)).toEqual([
+      DEFAULT_WORKSPACE_PIN_GROUP_ID,
+      "pgrp_current",
+    ]);
+  });
+
+  test("migrates fresh storage when the sidecar is absent", async () => {
+    const projectsPath = path.join(tmpDir, "projects");
+    const filePath = path.join(projectsPath, "fresh-sidecar-workspaces.json");
+    const sidecarPath = path.join(projectsPath, "fresh-sidecar-workspaces.pin-groups.json");
+    const backupPath = path.join(projectsPath, "fresh-sidecar-workspaces.pin-groups.backup.json");
+    const markerPath = path.join(projectsPath, "fresh-sidecar-workspaces.pin-groups.expected.json");
+    for (const artifactPath of [filePath, sidecarPath, backupPath, markerPath]) {
+      expect(existsSync(artifactPath)).toBe(false);
+    }
+
+    const registry = new FileBackedWorkspaceRegistry(filePath, logger);
+    await registry.initialize();
+
+    expect((await registry.listPinGroups()).map((group) => group.id)).toEqual([
+      DEFAULT_WORKSPACE_PIN_GROUP_ID,
+    ]);
+    expect(JSON.parse(readFileSync(sidecarPath, "utf8"))).toMatchObject({ formatVersion: 1 });
+    expect(readFileSync(backupPath, "utf8")).toBe(readFileSync(sidecarPath, "utf8"));
+    expect(readFileSync(markerPath, "utf8")).toBe(`${JSON.stringify({ formatVersion: 1 })}\n`);
   });
 
   test("rejects a newer transaction format without touching registry bytes", async () => {
