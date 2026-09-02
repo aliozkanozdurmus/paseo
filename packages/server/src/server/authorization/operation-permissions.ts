@@ -203,6 +203,7 @@ const INBOUND_PERMISSION = {
   "workspace.script.stop.request": "workspace.write",
   "workspace.title.set.request": "workspace.manage",
   workspace_setup_status_request: "workspace.read",
+  "workspace.setup.run.request": "workspace.write",
   write_project_config_request: "workspace.write",
 } as const satisfies Record<InboundOperation, DaemonPermission | null>;
 
@@ -419,6 +420,7 @@ const OUTBOUND_PERMISSION = {
   "workspace.title.set.response": "workspace.manage",
   workspace_setup_progress: "workspace.read",
   workspace_setup_status_response: "workspace.read",
+  "workspace.setup.run.response": "workspace.write",
   workspace_update: "workspace.read",
   write_project_config_response: "workspace.write",
 } as const satisfies Record<OutboundOperation, DaemonPermission | null>;

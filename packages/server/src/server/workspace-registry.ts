@@ -14,6 +14,14 @@ import {
   type PersistedProjectKind,
   type PersistedWorkspaceKind,
 } from "./workspace-registry-model.js";
+import type { UntrustedWorkspaceSource } from "./workspace-automation-gate.js";
+
+const UntrustedWorkspaceSourceSchema = z.object({
+  kind: z.literal("change_request"),
+  forge: z.string(),
+  number: z.number().int().positive(),
+  headRepository: z.string(),
+});
 
 const PersistedProjectRecordSchema = z.object({
   projectId: z.string(),
@@ -107,6 +115,7 @@ const PersistedWorkspaceRecordSchema = z.object({
     .optional()
     .transform((value) => value ?? null),
   labels: z.array(z.string()).optional(),
+  untrustedSource: UntrustedWorkspaceSourceSchema.optional(),
 });
 
 const WorkspaceRegistryFileSchema = z.union([
@@ -1955,6 +1964,7 @@ export function createPersistedWorkspaceRecord(input: {
   pinGroupId?: string | null;
   pinGroupAssignedAt?: string | null;
   labels?: string[];
+  untrustedSource?: UntrustedWorkspaceSource;
 }): PersistedWorkspaceRecord {
   // COMPAT(workspacePinGroups): added in v0.7.0, remove pinnedAt migration/projection after 2027-03-01.
   const pinGroupId = input.pinGroupId ?? (input.pinnedAt ? DEFAULT_WORKSPACE_PIN_GROUP_ID : null);
