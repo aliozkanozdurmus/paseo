@@ -243,7 +243,7 @@ interface SidebarWorkspaceListProps {
   listHeaderComponent?: ReactElement | null;
   /** Gesture ref for coordinating with parent gestures (e.g., sidebar close) */
   parentGestureRef?: MutableRefObject<GestureType | undefined>;
-  dragGestureHostPresented?: boolean;
+  dragGestureHostActive?: boolean;
 }
 
 interface ProjectHeaderRowProps {
@@ -1554,7 +1554,7 @@ function ProjectBlock({
   isDragging,
   dragHandleProps,
   useNestable,
-  dragGestureHostPresented,
+  dragGestureHostActive,
   creatingWorkspaceIds,
   activeWorkspaceSelection,
   hostBadgeByServerId,
@@ -1579,7 +1579,7 @@ function ProjectBlock({
   isDragging: boolean;
   dragHandleProps?: DraggableListDragHandleProps;
   useNestable: boolean;
-  dragGestureHostPresented?: boolean;
+  dragGestureHostActive?: boolean;
   creatingWorkspaceIds: ReadonlySet<string>;
   activeWorkspaceSelection: ActiveWorkspaceSelection | null;
   hostBadgeByServerId: ReadonlyMap<string, HostBadgeModel>;
@@ -1759,7 +1759,7 @@ function ProjectBlock({
             useDragHandle
             nestable={useNestable}
             simultaneousGestureRef={parentGestureRef}
-            gestureHostPresented={dragGestureHostPresented}
+            gestureHostPresented={dragGestureHostActive}
             containerStyle={styles.workspaceListContainer}
           />
           {canToggleWorkspaces ? (
@@ -1843,7 +1843,7 @@ function areProjectBlockPropsEqual(previous: ProjectBlockProps, next: ProjectBlo
     previous.isDragging === next.isDragging &&
     previous.dragHandleProps === next.dragHandleProps &&
     previous.useNestable === next.useNestable &&
-    previous.dragGestureHostPresented === next.dragGestureHostPresented &&
+    previous.dragGestureHostActive === next.dragGestureHostActive &&
     previous.creatingWorkspaceIds === next.creatingWorkspaceIds &&
     areProjectBlockSelectionsEqual(previous, next)
   );
@@ -1896,7 +1896,7 @@ export function SidebarWorkspaceList({
   listFooterComponent,
   listHeaderComponent,
   parentGestureRef,
-  dragGestureHostPresented,
+  dragGestureHostActive,
 }: SidebarWorkspaceListProps) {
   const pathname = usePathname();
   const hosts = useHosts();
@@ -2020,7 +2020,7 @@ export function SidebarWorkspaceList({
         listHeaderComponent={listHeaderComponent}
         sidebarFilterEmpty={sidebarFilterEmpty}
         parentGestureRef={parentGestureRef}
-        dragGestureHostPresented={dragGestureHostPresented}
+        dragGestureHostActive={dragGestureHostActive}
       />
     ) : (
       <ProjectModeList
@@ -2038,7 +2038,7 @@ export function SidebarWorkspaceList({
         sidebarFilterEmpty={sidebarFilterEmpty}
         hasActiveProjectFilter={hasActiveProjectFilter}
         parentGestureRef={parentGestureRef}
-        dragGestureHostPresented={dragGestureHostPresented}
+        dragGestureHostActive={dragGestureHostActive}
         pathname={pathname}
         hostBadgeByServerId={hostBadgeByServerId}
         supportsMultiplicityByServerId={supportsMultiplicityByServerId}
@@ -2073,7 +2073,7 @@ function SidebarGroupedModeList({
   listHeaderComponent,
   sidebarFilterEmpty,
   parentGestureRef,
-  dragGestureHostPresented,
+  dragGestureHostActive,
 }: {
   workspaceGroups: SidebarWorkspaceGroup[];
   pinnedGroups: PinnedSidebarGroups;
@@ -2089,7 +2089,7 @@ function SidebarGroupedModeList({
   listHeaderComponent?: ReactElement | null;
   sidebarFilterEmpty: boolean;
   parentGestureRef?: MutableRefObject<GestureType | undefined>;
-  dragGestureHostPresented?: boolean;
+  dragGestureHostActive?: boolean;
 }) {
   const showShortcutBadges = useShowShortcutBadges();
   const pinnedWorkspaces = useMemo(
@@ -2117,7 +2117,7 @@ function SidebarGroupedModeList({
       listHeaderComponent={listHeaderComponent}
       sidebarFilterEmpty={sidebarFilterEmpty}
       parentGestureRef={parentGestureRef}
-      dragGestureHostPresented={dragGestureHostPresented}
+      dragGestureHostActive={dragGestureHostActive}
     />
   );
 }
@@ -2137,7 +2137,7 @@ function ProjectModeList({
   sidebarFilterEmpty,
   hasActiveProjectFilter,
   parentGestureRef,
-  dragGestureHostPresented,
+  dragGestureHostActive,
   pathname,
   hostBadgeByServerId,
   supportsMultiplicityByServerId,
@@ -2356,7 +2356,7 @@ function ProjectModeList({
           isDragging={dragState.isDragging}
           dragHandleProps={dragState.dragHandleProps}
           useNestable={platformIsNative}
-          dragGestureHostPresented={dragGestureHostPresented}
+          dragGestureHostActive={dragGestureHostActive}
           creatingWorkspaceIds={creatingWorkspaceIds}
           activeWorkspaceSelection={activeWorkspaceSelection}
           hostBadgeByServerId={hostBadgeByServerId}
@@ -2378,7 +2378,7 @@ function ProjectModeList({
       onWorkspacePress,
       onToggleProjectCollapsed,
       parentGestureRef,
-      dragGestureHostPresented,
+      dragGestureHostActive,
       projectIconByProjectViewKey,
       selectionEnabled,
       shortcutIndexByWorkspaceKey,
@@ -2457,7 +2457,7 @@ function ProjectModeList({
         useDragHandle
         nestable={platformIsNative}
         simultaneousGestureRef={parentGestureRef}
-        gestureHostPresented={dragGestureHostPresented}
+        gestureHostPresented={dragGestureHostActive}
         containerStyle={styles.projectListContainer}
       />
     );
@@ -2484,7 +2484,7 @@ function ProjectModeList({
                 useDragHandle
                 nestable={platformIsNative}
                 simultaneousGestureRef={parentGestureRef}
-                gestureHostPresented={dragGestureHostPresented}
+                gestureHostPresented={dragGestureHostActive}
                 containerStyle={styles.workspaceListContainer}
               />
               {canTogglePinnedChats ? (

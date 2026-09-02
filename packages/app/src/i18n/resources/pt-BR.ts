@@ -203,6 +203,7 @@ export const ptBR: TranslationResources = {
     empty: "Comece a conversar com este agente...",
     scrollToBottom: "Rolar para o fim",
     historyLoadFailed: "Não foi possível carregar o histórico do agente",
+    messageCapped: "Esta mensagem foi truncada ({{bytes}} bytes).",
     permission: {
       plan: "Plano",
       required: "Permissão necessária",
@@ -1124,6 +1125,7 @@ export const ptBR: TranslationResources = {
     },
     sections: {
       sessions: "Histórico",
+      search: "Buscar",
       schedules: "Agendamentos",
     },
     worktreeSetup: {
@@ -2129,6 +2131,12 @@ export const ptBR: TranslationResources = {
       chatOutline: {
         title: "Estrutura do chat",
         description: "Mostrar uma estrutura para navegar entre prompts",
+      },
+      sidebar: {
+        title: "Barra lateral",
+        description: "Escolha quais itens aparecem no topo da barra lateral e em que ordem",
+        moveUp: "Mover para cima",
+        moveDown: "Mover para baixo",
       },
       fonts: {
         title: "Fontes",

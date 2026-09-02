@@ -203,6 +203,7 @@ export const ja: TranslationResources = {
     empty: "このエージェントとチャットを始めましょう...",
     scrollToBottom: "下にスクロール",
     historyLoadFailed: "エージェントの履歴を読み込めませんでした",
+    messageCapped: "このメッセージは上限で切り詰められました（{{bytes}}バイト）。",
     permission: {
       plan: "プラン",
       required: "権限が必要です",
@@ -1111,6 +1112,7 @@ export const ja: TranslationResources = {
     },
     sections: {
       sessions: "履歴",
+      search: "検索",
       schedules: "スケジュール",
     },
     worktreeSetup: {
@@ -2112,6 +2114,12 @@ export const ja: TranslationResources = {
       chatOutline: {
         title: "チャットのアウトライン",
         description: "プロンプト間を移動するためのアウトラインを表示します",
+      },
+      sidebar: {
+        title: "サイドバー",
+        description: "サイドバー上部に表示する項目とその順序を選択します",
+        moveUp: "上に移動",
+        moveDown: "下に移動",
       },
       fonts: {
         title: "フォント",

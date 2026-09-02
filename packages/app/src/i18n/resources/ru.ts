@@ -203,6 +203,7 @@ export const ru: TranslationResources = {
     empty: "Начните общаться с этим агентом...",
     scrollToBottom: "Прокрутить вниз",
     historyLoadFailed: "Не удалось загрузить историю агента",
+    messageCapped: "Это сообщение было обрезано ({{bytes}} байт).",
     permission: {
       plan: "План",
       required: "Требуется разрешение",
@@ -1115,6 +1116,7 @@ export const ru: TranslationResources = {
     },
     sections: {
       sessions: "История",
+      search: "Поиск",
       schedules: "Расписания",
     },
     worktreeSetup: {
@@ -2131,6 +2133,13 @@ export const ru: TranslationResources = {
       chatOutline: {
         title: "Оглавление чата",
         description: "Показывать оглавление для перехода между запросами",
+      },
+      sidebar: {
+        title: "Боковая панель",
+        description:
+          "Выберите, какие элементы отображаются вверху боковой панели и в каком порядке",
+        moveUp: "Переместить вверх",
+        moveDown: "Переместить вниз",
       },
       fonts: {
         title: "Шрифты",

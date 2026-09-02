@@ -203,6 +203,7 @@ export const es: TranslationResources = {
     empty: "Comience a chatear con este agente...",
     scrollToBottom: "Desplazarse hacia abajo",
     historyLoadFailed: "No se pudo cargar el historial del agente",
+    messageCapped: "Este mensaje fue truncado ({{bytes}} bytes).",
     permission: {
       plan: "Plan",
       required: "Permiso requerido",
@@ -1133,6 +1134,7 @@ export const es: TranslationResources = {
     },
     sections: {
       sessions: "Historial",
+      search: "Buscar",
       schedules: "Horarios",
     },
     worktreeSetup: {
@@ -2145,6 +2147,13 @@ export const es: TranslationResources = {
       chatOutline: {
         title: "Esquema del chat",
         description: "Muestra un esquema para saltar entre instrucciones",
+      },
+      sidebar: {
+        title: "Barra lateral",
+        description:
+          "Elige qué elementos aparecen en la parte superior de la barra lateral y en qué orden",
+        moveUp: "Mover hacia arriba",
+        moveDown: "Mover hacia abajo",
       },
       fonts: {
         title: "Fuentes",

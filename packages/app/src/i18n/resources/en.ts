@@ -200,6 +200,7 @@ export const en = {
     empty: "Start chatting with this agent...",
     scrollToBottom: "Scroll to bottom",
     historyLoadFailed: "Couldn't load agent history",
+    messageCapped: "This message was capped ({{bytes}} bytes).",
     permission: {
       plan: "Plan",
       required: "Permission Required",
@@ -1126,6 +1127,7 @@ export const en = {
     },
     sections: {
       sessions: "History",
+      search: "Search",
       schedules: "Schedules",
     },
     worktreeSetup: {
@@ -2212,6 +2214,12 @@ export const en = {
       chatOutline: {
         title: "Chat outline",
         description: "Show an outline for jumping between prompts",
+      },
+      sidebar: {
+        title: "Sidebar",
+        description: "Choose which items appear at the top of the sidebar and in what order",
+        moveUp: "Move up",
+        moveDown: "Move down",
       },
       fonts: {
         title: "Fonts",

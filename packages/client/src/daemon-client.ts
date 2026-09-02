@@ -1,6 +1,7 @@
 import type { z } from "zod";
 import { CLIENT_CAPS, type ClientCapability } from "@getpaseo/protocol/client-capabilities";
 import type { AgentAttentionNotificationPayload } from "@getpaseo/protocol/agent-attention-notification";
+import { parsePluginSourceReference } from "@getpaseo/protocol/plugin-source-reference";
 import {
   AgentCreateFailedStatusPayloadSchema,
   AgentCreatedStatusPayloadSchema,
@@ -2940,6 +2941,19 @@ export class DaemonClient {
     return payload;
   }
 
+  async appendAgentTimelineItem(
+    agentId: string,
+    item: Omit<import("@getpaseo/protocol/agent-types").PluginTimelineItem, "pluginId">,
+  ): Promise<{ seq: number; epoch: string }> {
+    const requestId = this.createRequestId();
+    const payload = await this.sendCorrelatedSessionRequest({
+      requestId,
+      message: { type: "agent.timeline.append.request", requestId, agentId, item },
+      responseType: "agent.timeline.append.response",
+    });
+    return { seq: payload.seq, epoch: payload.epoch };
+  }
+
   async listAgentTimelinePrompts(
     agentId: string,
     options: { requestId?: string; timeout?: number } = {},
@@ -5029,12 +5043,19 @@ export class DaemonClient {
     source: string;
     id?: string;
     ref?: string;
-    pluginPath?: string;
   }): Promise<PluginListItem> {
     const requestId = this.createRequestId();
+    const reference = parsePluginSourceReference(input.source);
     const payload = await this.sendCorrelatedSessionRequest({
       requestId,
-      message: { type: "plugin.source.install.request", requestId, ...input },
+      message: {
+        type: "plugin.source.install.request",
+        requestId,
+        source: reference.source,
+        ...(reference.pluginPath ? { pluginPath: reference.pluginPath } : {}),
+        ...(input.id ? { id: input.id } : {}),
+        ...(input.ref ? { ref: input.ref } : {}),
+      },
       responseType: "plugin.source.install.response",
     });
     return payload.plugin;

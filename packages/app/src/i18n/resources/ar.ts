@@ -203,6 +203,7 @@ export const ar: TranslationResources = {
     empty: "ابدأ الدردشة مع هذا الوكيل...",
     scrollToBottom: "قم بالتمرير إلى الأسفل",
     historyLoadFailed: "تعذر تحميل سجل الوكيل",
+    messageCapped: "تم اقتطاع هذه الرسالة ({{bytes}} بايت).",
     permission: {
       plan: "يخطط",
       required: "الإذن مطلوب",
@@ -1099,6 +1100,7 @@ export const ar: TranslationResources = {
     },
     sections: {
       sessions: "السجل",
+      search: "بحث",
       schedules: "الجداول",
     },
     worktreeSetup: {
@@ -2095,6 +2097,12 @@ export const ar: TranslationResources = {
       chatOutline: {
         title: "مخطط المحادثة",
         description: "عرض مخطط للتنقل بين المطالبات",
+      },
+      sidebar: {
+        title: "الشريط الجانبي",
+        description: "اختر العناصر التي تظهر أعلى الشريط الجانبي وترتيبها",
+        moveUp: "نقل لأعلى",
+        moveDown: "نقل لأسفل",
       },
       fonts: {
         title: "الخطوط",

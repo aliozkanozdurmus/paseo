@@ -203,6 +203,7 @@ export const ko: TranslationResources = {
     empty: "이 에이전트와 대화를 시작하세요...",
     scrollToBottom: "맨 아래로 스크롤",
     historyLoadFailed: "에이전트 기록을 로드할 수 없습니다.",
+    messageCapped: "이 메시지는 길이 제한으로 잘렸습니다({{bytes}}바이트).",
     permission: {
       plan: "계획",
       required: "권한 필요",
@@ -1106,6 +1107,7 @@ export const ko: TranslationResources = {
     },
     sections: {
       sessions: "기록",
+      search: "검색",
       schedules: "일정",
     },
     worktreeSetup: {
@@ -2106,6 +2108,12 @@ export const ko: TranslationResources = {
       chatOutline: {
         title: "채팅 개요",
         description: "프롬프트 사이를 이동하기 위한 개요 표시",
+      },
+      sidebar: {
+        title: "사이드바",
+        description: "사이드바 상단에 표시할 항목과 순서를 선택하세요",
+        moveUp: "위로 이동",
+        moveDown: "아래로 이동",
       },
       fonts: {
         title: "글꼴",
